@@ -10,6 +10,10 @@ from modules.text_processor import (
     split_text_into_chunks
 )
 
+from modules.summarizer import (
+    generate_summary
+)
+
 
 # Page configuration
 st.set_page_config(
@@ -25,7 +29,7 @@ st.title("🎓 EduSense AI")
 st.subheader("AI-Powered Learning Assistant")
 
 st.write(
-    "Upload your study material and explore its content."
+    "Upload your study material and use AI to understand it."
 )
 
 
@@ -63,7 +67,7 @@ if uploaded_file is not None:
         uploaded_file
     )
 
-    # Clean extracted text
+    # Clean text
     cleaned_text = clean_text(
         text
     )
@@ -74,16 +78,16 @@ if uploaded_file is not None:
         chunk_size=1000
     )
 
-    # Check whether text was extracted
+    # Check extracted text
     if cleaned_text:
 
-        # Display extracted content
+        # Extracted content
         st.subheader("📖 Extracted Content")
 
         st.text_area(
             "Study Material",
             cleaned_text,
-            height=500
+            height=400
         )
 
         # Document statistics
@@ -105,24 +109,62 @@ if uploaded_file is not None:
 
         with col3:
             st.metric(
-                "🔤 Characters",
-                len(cleaned_text)
+                "✂️ Chunks",
+                len(chunks)
             )
 
-        # Display text chunks
+        # Text chunks
         st.subheader("✂️ Text Chunks")
 
         st.write(
             f"Document divided into {len(chunks)} chunks."
         )
 
-        # Show first 5 chunks
         for i, chunk in enumerate(chunks[:5]):
 
             with st.expander(
                 f"Chunk {i + 1}"
             ):
                 st.write(chunk)
+
+        # AI Summary
+        st.subheader("📝 AI Summary")
+
+        if st.button("✨ Generate Summary"):
+
+            with st.spinner(
+                "🤖 AI is generating your summary..."
+            ):
+
+                try:
+
+                    summary = generate_summary(
+                        cleaned_text
+                    )
+
+                    if summary:
+
+                        st.success(
+                            "Summary generated!"
+                        )
+
+                        st.markdown(
+                            "### 📌 Summary"
+                        )
+
+                        st.write(summary)
+
+                    else:
+
+                        st.warning(
+                            "The AI returned an empty summary."
+                        )
+
+                except Exception as e:
+
+                    st.error(
+                        f"❌ Could not generate summary: {e}"
+                    )
 
     else:
 
