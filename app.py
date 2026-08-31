@@ -1,5 +1,15 @@
 import streamlit as st
-import fitz
+
+from modules.pdf_processor import (
+    extract_text_from_pdf,
+    get_pdf_page_count
+)
+
+from modules.text_processor import (
+    clean_text,
+    split_text_into_chunks
+)
+
 
 # Page configuration
 st.set_page_config(
@@ -8,18 +18,22 @@ st.set_page_config(
     layout="wide"
 )
 
+
 # Header
 st.title("🎓 EduSense AI")
+
 st.subheader("AI-Powered Learning Assistant")
 
 st.write(
     "Upload your study material and explore its content."
 )
 
+
 # Sidebar
 with st.sidebar:
     st.header("📚 Learning Tools")
     st.write("Upload a PDF to get started.")
+
 
 # PDF uploader
 uploaded_file = st.file_uploader(
@@ -27,56 +41,88 @@ uploaded_file = st.file_uploader(
     type=["pdf"]
 )
 
+
+# Process uploaded PDF
 if uploaded_file is not None:
 
-    st.success(f"Uploaded: {uploaded_file.name}")
-
-    # Open PDF
-    pdf_document = fitz.open(
-        stream=uploaded_file.read(),
-        filetype="pdf"
+    st.success(
+        f"Uploaded: {uploaded_file.name}"
     )
 
-    # PDF information
-    total_pages = len(pdf_document)
+    # Get page count
+    page_count = get_pdf_page_count(
+        uploaded_file
+    )
 
-    st.info(f"📑 Total pages: {total_pages}")
+    st.info(
+        f"📑 Total pages: {page_count}"
+    )
 
     # Extract text
-    text = ""
+    text = extract_text_from_pdf(
+        uploaded_file
+    )
 
-    for page in pdf_document:
-        text += page.get_text()
+    # Clean extracted text
+    cleaned_text = clean_text(
+        text
+    )
 
-    pdf_document.close()
+    # Split text into chunks
+    chunks = split_text_into_chunks(
+        cleaned_text,
+        chunk_size=1000
+    )
 
-    # Display extracted text
-    if text.strip():
+    # Check whether text was extracted
+    if cleaned_text:
 
+        # Display extracted content
         st.subheader("📖 Extracted Content")
 
         st.text_area(
             "Study Material",
-            text,
+            cleaned_text,
             height=500
         )
 
-        # Basic statistics
-        words = text.split()
+        # Document statistics
+        words = cleaned_text.split()
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
 
         with col1:
+            st.metric(
+                "📄 Pages",
+                page_count
+            )
+
+        with col2:
             st.metric(
                 "📝 Words",
                 len(words)
             )
 
-        with col2:
+        with col3:
             st.metric(
                 "🔤 Characters",
-                len(text)
+                len(cleaned_text)
             )
+
+        # Display text chunks
+        st.subheader("✂️ Text Chunks")
+
+        st.write(
+            f"Document divided into {len(chunks)} chunks."
+        )
+
+        # Show first 5 chunks
+        for i, chunk in enumerate(chunks[:5]):
+
+            with st.expander(
+                f"Chunk {i + 1}"
+            ):
+                st.write(chunk)
 
     else:
 
