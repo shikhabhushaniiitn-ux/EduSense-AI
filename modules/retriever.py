@@ -1,5 +1,12 @@
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import faiss
+
+
+# Load embedding model only once
+model = SentenceTransformer(
+    "all-MiniLM-L6-v2"
+)
 
 
 def find_relevant_chunks(
@@ -7,42 +14,70 @@ def find_relevant_chunks(
     chunks,
     top_k=3
 ):
-    """Find the most relevant chunks for a question."""
+    """
+    Find semantically relevant chunks
+    using Sentence Transformers + FAISS.
+    """
 
+    # Check empty question
     if not question.strip():
         return []
 
+    # Check empty chunks
     if not chunks:
         return []
 
-    # Create TF-IDF representation
-    vectorizer = TfidfVectorizer(
-        stop_words="english"
+    # Convert chunks into embeddings
+    chunk_embeddings = model.encode(
+        chunks,
+        convert_to_numpy=True,
+        normalize_embeddings=True
     )
 
-    documents = chunks + [question]
-
-    tfidf_matrix = vectorizer.fit_transform(
-        documents
+    # Convert question into embedding
+    question_embedding = model.encode(
+        [question],
+        convert_to_numpy=True,
+        normalize_embeddings=True
     )
 
-    # Compare question with chunks
-    similarities = cosine_similarity(
-        tfidf_matrix[-1],
-        tfidf_matrix[:-1]
-    ).flatten()
+    # Get embedding dimension
+    dimension = chunk_embeddings.shape[1]
 
-    # Get indexes of most relevant chunks
-    ranked_indexes = similarities.argsort()[::-1]
+    # Create FAISS index
+    index = faiss.IndexFlatIP(
+        dimension
+    )
 
+    # Add document embeddings
+    index.add(
+        chunk_embeddings.astype(
+            "float32"
+        )
+    )
+
+    # Search most similar chunks
+    scores, indexes = index.search(
+        question_embedding.astype(
+            "float32"
+        ),
+        min(top_k, len(chunks))
+    )
+
+    # Store relevant chunks
     relevant_chunks = []
 
-    for index in ranked_indexes[:top_k]:
+    for score, chunk_index in zip(
+        scores[0],
+        indexes[0]
+    ):
 
-        if similarities[index] > 0:
+        # Ignore invalid indexes
+        if chunk_index == -1:
+            continue
 
-            relevant_chunks.append(
-                chunks[index]
-            )
+        relevant_chunks.append(
+            chunks[chunk_index]
+        )
 
     return relevant_chunks
