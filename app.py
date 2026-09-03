@@ -143,6 +143,11 @@ defaults = {
 
     "weekly_answer_evaluation": None,
 
+    # Cache of the real AI explanation per day, so flipping
+    # between days (Prev/Next/Jump) doesn't re-call the AI for
+    # a day you've already visited.
+    "weekly_day_explanations": {},
+
     # AI Teaching Voice - cache of generated (audio, word_timings)
     # per section, keyed by a hash of its text - so listening to
     # the same section twice doesn't re-call the TTS service.
@@ -304,6 +309,8 @@ else:
 
             st.session_state.weekly_answer_evaluation = None
 
+            st.session_state.weekly_day_explanations = {}
+
             with st.spinner(
                 f"✨ Building study material on \"{topic_query}\"..."
             ):
@@ -415,6 +422,8 @@ if uploaded_file is not None:
         st.session_state.weekly_day_answer = ""
 
         st.session_state.weekly_answer_evaluation = None
+
+        st.session_state.weekly_day_explanations = {}
 
         with st.spinner(
             "📄 Processing your study material..."
@@ -934,6 +943,8 @@ if st.session_state.cleaned_text:
 
                     st.session_state.weekly_answer_evaluation = None
 
+                    st.session_state.weekly_day_explanations = {}
+
                     st.success(
                         "✅ Personalized lesson created!"
                     )
@@ -1218,11 +1229,71 @@ if st.session_state.cleaned_text:
                     )
 
             # ----------------------------------------------------
+            # 👨‍🏫 Today's Lesson — the actual explanation, not
+            # just focus + bullet fragments. Same function the
+            # single-lesson AI Teacher already uses (teacher.py),
+            # cached per day_number so it's not re-called on
+            # every click/rerun.
+            # ----------------------------------------------------
+
+            if day_number not in st.session_state.weekly_day_explanations:
+
+                with st.spinner(
+                    "👨‍🏫 Preparing today's lesson..."
+                ):
+
+                    try:
+
+                        day_section = {
+                            "title": day_title,
+                            "description": focus,
+                            "key_points": key_points
+                        }
+
+                        explanation = generate_teacher_explanation(
+                            day_section,
+                            st.session_state.cleaned_text,
+                            st.session_state.student_level,
+                            st.session_state.preferred_language
+                        )
+
+                        st.session_state.weekly_day_explanations[
+                            day_number
+                        ] = explanation
+
+                    except Exception as e:
+
+                        st.error(
+                            f"❌ Could not generate today's lesson: {e}"
+                        )
+
+                        st.session_state.weekly_day_explanations[
+                            day_number
+                        ] = ""
+
+            day_explanation = (
+                st.session_state.weekly_day_explanations.get(
+                    day_number,
+                    ""
+                )
+            )
+
+            if day_explanation:
+
+                st.markdown(
+                    "### 👨‍🏫 Today's Lesson"
+                )
+
+                st.markdown(
+                    day_explanation
+                )
+
+            # ----------------------------------------------------
             # 🔊 AI Teaching Voice for this day (same zero-cost
             # Edge TTS helper as the single-lesson AI Teacher)
             # ----------------------------------------------------
 
-            day_speech_text = focus
+            day_speech_text = day_explanation if day_explanation else focus
 
             if key_points:
 
