@@ -140,7 +140,16 @@ Return only the teaching explanation.
 
     try:
 
-        result = generate_text(prompt)
+        # Explanations are naturally long-form (multiple
+        # paragraphs, an example, level-appropriate depth) -
+        # the default 500-token budget was cutting them off
+        # mid-sentence. 1200 covers this comfortably, and the
+        # auto-retry in generate_text() is a safety net if a
+        # very long Advanced-level explanation still needs more.
+        result = generate_text(
+            prompt,
+            max_tokens=1200
+        )
 
         if result:
 
@@ -314,7 +323,10 @@ Rules:
 
     try:
 
-        result = generate_text(prompt)
+        result = generate_text(
+            prompt,
+            max_tokens=700
+        )
 
         if result:
 
@@ -438,7 +450,10 @@ Return only the feedback.
 
     try:
 
-        result = generate_text(prompt)
+        result = generate_text(
+            prompt,
+            max_tokens=700
+        )
 
         if result:
 

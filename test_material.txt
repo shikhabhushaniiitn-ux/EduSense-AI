@@ -1,0 +1,19 @@
+Regression is a supervised learning technique used to predict continuous values.
+
+In supervised learning, each input x has a desired output y.
+
+The output y is called a label.
+
+Classification is used when the output is discrete.
+
+Regression is used when the output is continuous.
+
+Linear regression models the relationship between input and output using a straight line.
+
+Multiple linear regression uses multiple input features.
+
+Gradient descent is an optimization algorithm used to minimize the loss function.
+
+Common types of regression include linear regression, polynomial regression, ridge regression and lasso regression.
+
+Regression performance can be evaluated using metrics such as Mean Absolute Error, Mean Squared Error, Root Mean Squared Error and R-squared.

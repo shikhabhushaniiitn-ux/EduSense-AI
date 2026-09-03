@@ -10,11 +10,16 @@ from modules.text_processor import (
     split_text_into_chunks
 )
 
+from modules.topic_generator import (
+    generate_study_material_from_topic
+)
+
 from modules.summarizer import (
     generate_summary
 )
 
 from modules.retriever import (
+    build_chunk_index,
     find_relevant_chunks
 )
 
@@ -23,12 +28,47 @@ from modules.qa import (
 )
 
 from modules.lesson_planner import (
-    generate_lesson_plan
+    generate_lesson_plan,
+    generate_weekly_lesson_plan
 )
 
 from modules.teacher import (
     generate_teacher_explanation
 )
+
+from modules.assessment import (
+    evaluate_answer
+)
+
+from modules.teaching_engine import (
+    initialize_lesson,
+    get_current_section,
+    get_progress,
+    move_to_next_section,
+    move_to_previous_section,
+    save_answer,
+    mark_section_completed,
+    update_concept_performance,
+    record_attempt,
+    update_difficulty,
+    get_learning_summary,
+    initialize_weekly_lesson,
+    get_current_day,
+    get_weekly_progress,
+    move_to_next_day,
+    move_to_previous_day,
+    save_day_answer,
+    mark_day_completed,
+    is_weekly_complete
+)
+
+from modules.audio_teacher import (
+    generate_speech,
+    get_cache_key,
+    build_synced_player_html
+)
+
+import streamlit.components.v1 as components
 
 
 # ============================================================
@@ -54,6 +94,8 @@ defaults = {
 
     "chunks": [],
 
+    "chunk_index": None,
+
     "page_count": 0,
 
     "file_name": "",
@@ -64,19 +106,47 @@ defaults = {
 
     "source_chunks": [],
 
+    # Lesson planner
     "lesson_plan": None,
 
+    "student_level": "Beginner",
+
+    "preferred_language": "English",
+
+    "lesson_duration": 20,
+
+    "focus_topic": "",
+
+    # Teacher
     "lesson_started": False,
 
-    "current_section": 0,
+    "teaching_state": None,
 
     "teacher_explanation": "",
 
-    "quiz_answers": {},
+    "answer_evaluation": None,
+
+    "student_answer": "",
+
+    "final_quiz_answers": {},
 
     "quiz_submitted": False,
 
-    "quiz_score": 0
+    "quiz_score": 0,
+
+    "quiz_breakdown": {},
+
+    # 7-day plan - interactive walkthrough
+    "weekly_teaching_state": None,
+
+    "weekly_day_answer": "",
+
+    "weekly_answer_evaluation": None,
+
+    # AI Teaching Voice - cache of generated (audio, word_timings)
+    # per section, keyed by a hash of its text - so listening to
+    # the same section twice doesn't re-call the TTS service.
+    "tts_cache": {}
 }
 
 
@@ -121,59 +191,230 @@ with st.sidebar:
         """
         **Current Features**
 
-        📄 PDF Processing
-        🧠 Semantic Search
-        🔍 Document Q&A
-        📝 AI Summary
-        📚 Source-based Answers
-        🎓 Lesson Planner
-        🧑‍🏫 AI Teacher
-        ❓ Knowledge Check
-        📊 Quiz Score
+        📄 PDF Processing  
+        💡 Topic Mode (no PDF needed)  
+        🧠 Semantic Search  
+        🔍 Document Q&A  
+        📝 AI Summary  
+        📚 Source-based Answers  
+        🎯 Personalized Lesson  
+        🧑‍🏫 AI Teacher  
+        ❓ Interactive Quiz  
+        📊 Learning Report  
+        📅 7-Day Plan
         """
     )
 
 
 # ============================================================
-# DOCUMENT UPLOAD
+# INPUT MODE: UPLOAD A PDF, OR ENTER A TOPIC
 # ============================================================
 
-uploaded_file = st.file_uploader(
-    "📄 Upload your study material",
-    type=["pdf"],
-    help="Upload a PDF containing your study material."
+input_mode = st.radio(
+    "How would you like to start?",
+    [
+        "📄 Upload Study Material",
+        "💡 Enter a Topic"
+    ],
+    horizontal=True,
+    key="input_mode"
 )
 
 
+uploaded_file = None
+
+if input_mode == "📄 Upload Study Material":
+
+    uploaded_file = st.file_uploader(
+        "📄 Upload your study material",
+        type=["pdf"],
+        help="Upload a PDF containing your study material."
+    )
+
+
+else:
+
+    topic_query = st.text_input(
+        "💡 What would you like to learn about?",
+        placeholder=(
+            "e.g. \"Photosynthesis\", \"Newton's Laws of Motion\", "
+            "\"Linear Regression\""
+        )
+    )
+
+    generate_topic_clicked = st.button(
+        "✨ Generate Study Material",
+        key="generate_topic_material"
+    )
+
+    if generate_topic_clicked:
+
+        if not topic_query or not topic_query.strip():
+
+            st.warning(
+                "⚠️ Please enter a topic first."
+            )
+
+        else:
+
+            # Reset document-related information - same reset
+            # list as the PDF upload path, so switching from a
+            # previous PDF (or a previous topic) to a new topic
+            # never leaves stale lesson/quiz state behind.
+
+            st.session_state.document_text = ""
+
+            st.session_state.cleaned_text = ""
+
+            st.session_state.chunks = []
+
+            st.session_state.chunk_index = None
+
+            st.session_state.page_count = 0
+
+            st.session_state.summary = ""
+
+            st.session_state.answer = ""
+
+            st.session_state.source_chunks = []
+
+            st.session_state.lesson_plan = None
+
+            st.session_state.lesson_started = False
+
+            st.session_state.teaching_state = None
+
+            st.session_state.teacher_explanation = ""
+
+            st.session_state.answer_evaluation = None
+
+            st.session_state.student_answer = ""
+
+            st.session_state.final_quiz_answers = {}
+
+            st.session_state.quiz_submitted = False
+
+            st.session_state.quiz_score = 0
+
+            st.session_state.quiz_breakdown = {}
+
+            st.session_state.weekly_teaching_state = None
+
+            st.session_state.weekly_day_answer = ""
+
+            st.session_state.weekly_answer_evaluation = None
+
+            with st.spinner(
+                f"✨ Building study material on \"{topic_query}\"..."
+            ):
+
+                try:
+
+                    # Always generate at Advanced depth here,
+                    # regardless of the level the student picks
+                    # later for the actual lesson (that choice
+                    # happens further down, in the Personalized
+                    # Lesson section, after this text already
+                    # exists). Generating the deepest version up
+                    # front means there's always enough material
+                    # for the lesson planner to scale DOWN for a
+                    # Beginner lesson or use in full for Advanced -
+                    # the same way one uploaded PDF already serves
+                    # every level.
+
+                    text = generate_study_material_from_topic(
+                        topic_query,
+                        level="Advanced"
+                    )
+
+                    cleaned_text = clean_text(
+                        text
+                    )
+
+                    chunks = split_text_into_chunks(
+                        cleaned_text,
+                        chunk_size=120,
+                        overlap=30
+                    )
+
+                    st.session_state.document_text = text
+
+                    st.session_state.cleaned_text = cleaned_text
+
+                    st.session_state.chunks = chunks
+
+                    st.session_state.chunk_index = build_chunk_index(
+                        chunks
+                    )
+
+                    st.session_state.page_count = "N/A"
+
+                    st.session_state.file_name = (
+                        f"Topic: {topic_query.strip()}"
+                    )
+
+                except Exception as e:
+
+                    st.error(
+                        f"❌ Could not generate study material: {e}"
+                    )
+
+
 # ============================================================
-# PROCESS DOCUMENT
+# PROCESS DOCUMENT (upload path only)
 # ============================================================
 
 if uploaded_file is not None:
 
-    if (
-        st.session_state.file_name
-        != uploaded_file.name
-    ):
+    # Process only when a new file is uploaded
 
-        # Reset document information
+    if st.session_state.file_name != uploaded_file.name:
+
+        # Reset document-related information
 
         st.session_state.document_text = ""
+
         st.session_state.cleaned_text = ""
+
         st.session_state.chunks = []
+
+        st.session_state.chunk_index = None
+
         st.session_state.page_count = 0
+
         st.session_state.summary = ""
+
         st.session_state.answer = ""
+
         st.session_state.source_chunks = []
 
+        # Reset lesson
+
         st.session_state.lesson_plan = None
+
         st.session_state.lesson_started = False
-        st.session_state.current_section = 0
+
+        st.session_state.teaching_state = None
+
         st.session_state.teacher_explanation = ""
 
-        st.session_state.quiz_answers = {}
+        st.session_state.answer_evaluation = None
+
+        st.session_state.student_answer = ""
+
+        st.session_state.final_quiz_answers = {}
+
         st.session_state.quiz_submitted = False
+
         st.session_state.quiz_score = 0
+
+        st.session_state.quiz_breakdown = {}
+
+        st.session_state.weekly_teaching_state = None
+
+        st.session_state.weekly_day_answer = ""
+
+        st.session_state.weekly_answer_evaluation = None
 
         with st.spinner(
             "📄 Processing your study material..."
@@ -181,17 +422,33 @@ if uploaded_file is not None:
 
             try:
 
+                # ------------------------------------------------
+                # Page count
+                # ------------------------------------------------
+
                 page_count = get_pdf_page_count(
                     uploaded_file
                 )
+
+                # ------------------------------------------------
+                # Extract text
+                # ------------------------------------------------
 
                 text = extract_text_from_pdf(
                     uploaded_file
                 )
 
+                # ------------------------------------------------
+                # Clean text
+                # ------------------------------------------------
+
                 cleaned_text = clean_text(
                     text
                 )
+
+                # ------------------------------------------------
+                # Create chunks
+                # ------------------------------------------------
 
                 chunks = split_text_into_chunks(
                     cleaned_text,
@@ -199,21 +456,25 @@ if uploaded_file is not None:
                     overlap=30
                 )
 
+                # ------------------------------------------------
+                # Save document information
+                # ------------------------------------------------
+
                 st.session_state.document_text = text
 
-                st.session_state.cleaned_text = (
-                    cleaned_text
-                )
+                st.session_state.cleaned_text = cleaned_text
 
                 st.session_state.chunks = chunks
 
-                st.session_state.page_count = (
-                    page_count
+                # Embed the chunks ONCE here, right after upload,
+                # instead of re-embedding them on every question.
+                st.session_state.chunk_index = build_chunk_index(
+                    chunks
                 )
 
-                st.session_state.file_name = (
-                    uploaded_file.name
-                )
+                st.session_state.page_count = page_count
+
+                st.session_state.file_name = uploaded_file.name
 
             except Exception as e:
 
@@ -237,10 +498,7 @@ if st.session_state.cleaned_text:
     # DOCUMENT STATISTICS
     # ========================================================
 
-    words = (
-        st.session_state.cleaned_text
-        .split()
-    )
+    words = st.session_state.cleaned_text.split()
 
     col1, col2, col3 = st.columns(3)
 
@@ -311,8 +569,6 @@ if st.session_state.cleaned_text:
     # AI SUMMARY
     # ========================================================
 
-    st.divider()
-
     st.subheader(
         "📝 AI Summary"
     )
@@ -362,6 +618,11 @@ if st.session_state.cleaned_text:
         "📚 Ask Your Study Material"
     )
 
+    st.write(
+        "Ask any question about the uploaded study material."
+    )
+
+
     question = st.text_input(
         "❓ Enter your question",
         placeholder=(
@@ -393,7 +654,7 @@ if st.session_state.cleaned_text:
                     relevant_chunks = (
                         find_relevant_chunks(
                             question,
-                            st.session_state.chunks,
+                            st.session_state.chunk_index,
                             top_k=3
                         )
                     )
@@ -418,6 +679,7 @@ if st.session_state.cleaned_text:
 
                 st.session_state.source_chunks = []
 
+
             else:
 
                 context = "\n\n".join(
@@ -425,7 +687,7 @@ if st.session_state.cleaned_text:
                 )
 
                 with st.spinner(
-                    "🤖 Generating answer..."
+                    "🤖 Generating answer from your study material..."
                 ):
 
                     try:
@@ -464,6 +726,7 @@ if st.session_state.cleaned_text:
             st.session_state.answer
         )
 
+
         if st.session_state.source_chunks:
 
             with st.expander(
@@ -478,19 +741,21 @@ if st.session_state.cleaned_text:
                         f"**Relevant Chunk {i + 1}**"
                     )
 
-                    st.write(chunk)
+                    st.write(
+                        chunk
+                    )
 
                     st.divider()
 
 
     # ========================================================
-    # LESSON PLANNER
+    # PERSONALIZED LESSON
     # ========================================================
 
     st.divider()
 
     st.header(
-        "🎓 Personalized Lesson"
+        "🎯 Personalized Lesson"
     )
 
     st.write(
@@ -514,7 +779,13 @@ if st.session_state.cleaned_text:
                 "Intermediate",
                 "Advanced"
             ],
-            key="student_level"
+            index=[
+                "Beginner",
+                "Intermediate",
+                "Advanced"
+            ].index(
+                st.session_state.student_level
+            )
         )
 
 
@@ -527,33 +798,68 @@ if st.session_state.cleaned_text:
                 "Hindi",
                 "Hinglish"
             ],
-            key="preferred_language"
+            index=[
+                "English",
+                "Hindi",
+                "Hinglish"
+            ].index(
+                st.session_state.preferred_language
+            )
         )
 
 
     with col3:
 
+        duration_options = [15, 20, 30, 45, 60, "7 Days"]
+
+        current_duration = st.session_state.lesson_duration
+
+        if current_duration not in duration_options:
+            current_duration = 20
+
         lesson_duration = st.selectbox(
             "⏱️ Lesson Duration",
-            [
-                15,
-                20,
-                30,
-                45
-            ],
-            index=1,
-            format_func=lambda x: f"{x} minutes",
-            key="lesson_duration"
+            duration_options,
+            index=duration_options.index(
+                current_duration
+            )
         )
 
 
     # --------------------------------------------------------
-    # Generate lesson plan
+    # Optional: focus on a specific topic/section
+    # --------------------------------------------------------
+
+    focus_topic = st.text_input(
+        "🔎 Focus on a specific topic/section (optional)",
+        value=st.session_state.focus_topic,
+        placeholder=(
+            "Leave blank for the whole document, or type e.g. "
+            "\"Gradient Descent\" or \"Chapter 3\""
+        )
+    )
+
+    st.session_state.focus_topic = focus_topic
+
+
+    # --------------------------------------------------------
+    # Save settings
+    # --------------------------------------------------------
+
+    st.session_state.student_level = student_level
+
+    st.session_state.preferred_language = preferred_language
+
+    st.session_state.lesson_duration = lesson_duration
+
+
+    # --------------------------------------------------------
+    # Generate lesson
     # --------------------------------------------------------
 
     if st.button(
-        "✨ Generate Lesson Plan",
-        key="lesson_plan_button"
+        "🎯 Generate Personalized Lesson",
+        key="lesson_button"
     ):
 
         with st.spinner(
@@ -562,35 +868,101 @@ if st.session_state.cleaned_text:
 
             try:
 
-                plan = generate_lesson_plan(
+                # IMPORTANT: use document_text (the raw extracted
+                # text, with line breaks intact), NOT cleaned_text.
+                # cleaned_text has already been through
+                # text_processor.clean_text(), which collapses every
+                # newline into a single space and strips non-ASCII
+                # characters. The lesson planner's heading detection
+                # works by splitting text into LINES, so handing it
+                # already-flattened text silently defeats it and
+                # forces it back onto unreliable word-frequency
+                # guessing - which is what produced garbled topics/
+                # concepts like "Regression Nagpur Indian" even
+                # after lesson_planner.py's own internal fix.
+                # lesson_planner.py does its own appropriate
+                # cleaning internally once headings are detected.
 
-                    st.session_state.cleaned_text,
+                if lesson_duration == "7 Days":
 
-                    student_level,
+                    lesson_plan = generate_weekly_lesson_plan(
+                        st.session_state.document_text,
+                        level=student_level,
+                        language=preferred_language,
+                        focus_topic=focus_topic
+                    )
 
-                    preferred_language,
+                else:
 
-                    lesson_duration
-                )
+                    lesson_plan = generate_lesson_plan(
+                        st.session_state.document_text,
+                        level=student_level,
+                        language=preferred_language,
+                        duration=lesson_duration,
+                        focus_topic=focus_topic
+                    )
 
-                st.session_state.lesson_plan = plan
+                if lesson_plan:
 
-                st.session_state.lesson_started = False
+                    st.session_state.lesson_plan = (
+                        lesson_plan
+                    )
 
-                st.session_state.current_section = 0
+                    # Reset teaching state
 
-                st.session_state.teacher_explanation = ""
+                    st.session_state.lesson_started = False
 
-                st.session_state.quiz_answers = {}
+                    st.session_state.teaching_state = None
 
-                st.session_state.quiz_submitted = False
+                    st.session_state.teacher_explanation = ""
 
-                st.session_state.quiz_score = 0
+                    st.session_state.answer_evaluation = None
+
+                    st.session_state.student_answer = ""
+
+                    st.session_state.final_quiz_answers = {}
+
+                    st.session_state.quiz_submitted = False
+
+                    st.session_state.quiz_score = 0
+
+                    st.session_state.quiz_breakdown = {}
+
+                    st.session_state.weekly_teaching_state = None
+
+                    st.session_state.weekly_day_answer = ""
+
+                    st.session_state.weekly_answer_evaluation = None
+
+                    st.success(
+                        "✅ Personalized lesson created!"
+                    )
+
+                    if (
+                        focus_topic
+                        and focus_topic.strip()
+                        and not lesson_plan.get(
+                            "focus_topic_found",
+                            True
+                        )
+                    ):
+
+                        st.info(
+                            f"ℹ️ Couldn't find \"{focus_topic}\" "
+                            "specifically in your material, so this "
+                            "lesson covers the whole document instead."
+                        )
+
+                else:
+
+                    st.error(
+                        "❌ Could not create lesson plan."
+                    )
 
             except Exception as e:
 
                 st.error(
-                    f"❌ Could not create lesson plan: {e}"
+                    f"❌ Lesson planner error: {e}"
                 )
 
 
@@ -598,10 +970,9 @@ if st.session_state.cleaned_text:
     # DISPLAY LESSON PLAN
     # ========================================================
 
-    plan = st.session_state.lesson_plan
+    if st.session_state.lesson_plan:
 
-
-    if plan:
+        lesson = st.session_state.lesson_plan
 
         st.divider()
 
@@ -609,45 +980,48 @@ if st.session_state.cleaned_text:
             "📘 Lesson Plan"
         )
 
-        st.markdown(
-            f"## 📘 {plan.get('topic', 'Lesson')}"
-        )
-
 
         # ----------------------------------------------------
         # Lesson information
         # ----------------------------------------------------
 
-        info1, info2, info3 = st.columns(3)
+        st.subheader(
+            f"📘 {lesson.get('topic', 'Lesson')}"
+        )
 
+        info1, info2, info3 = st.columns(3)
 
         with info1:
 
             st.metric(
                 "🎓 Level",
-                plan.get(
+                lesson.get(
                     "level",
                     student_level
                 )
             )
 
-
         with info2:
 
             st.metric(
                 "🌐 Language",
-                plan.get(
+                lesson.get(
                     "language",
                     preferred_language
                 )
             )
 
-
         with info3:
+
+            is_weekly_plan = bool(
+                lesson.get("days")
+            )
 
             st.metric(
                 "⏱️ Duration",
-                f"{plan.get('duration_minutes', lesson_duration)} min"
+                "7 Days"
+                if is_weekly_plan
+                else f"{lesson.get('duration_minutes', lesson_duration)} min"
             )
 
 
@@ -655,31 +1029,845 @@ if st.session_state.cleaned_text:
         # Learning objectives
         # ----------------------------------------------------
 
-        st.subheader(
-            "🎯 Learning Objectives"
-        )
-
-        objectives = plan.get(
+        objectives = lesson.get(
             "learning_objectives",
             []
         )
 
-        for objective in objectives:
+        if objectives:
 
-            st.write(
-                f"✅ {objective}"
+            st.markdown(
+                "### 🎯 Learning Objectives"
             )
 
+            for objective in objectives:
+
+                st.write(
+                    f"✅ {objective}"
+                )
+
 
         # ----------------------------------------------------
-        # Sections
+        # 7-DAY PLAN VIEW - interactive day-by-day walkthrough
         # ----------------------------------------------------
 
-        st.subheader(
-            "📖 Lesson Sections"
+        if is_weekly_plan:
+
+            days = lesson.get(
+                "days",
+                []
+            )
+
+            total_days = len(days)
+
+            if total_days == 0:
+
+                st.warning(
+                    "This 7-day plan has no days to show."
+                )
+
+                st.stop()
+
+            # ------------------------------------------------
+            # Initialize weekly teaching state once per plan.
+            # Reuses the SAME adaptive-learning machinery as the
+            # single-lesson flow (update_concept_performance,
+            # update_difficulty, get_learning_summary) - only the
+            # day-navigation helpers are new.
+            # ------------------------------------------------
+
+            if st.session_state.weekly_teaching_state is None:
+
+                st.session_state.weekly_teaching_state = (
+                    initialize_weekly_lesson(lesson)
+                )
+
+            weekly_state = st.session_state.weekly_teaching_state
+
+            current_day_index = weekly_state["current_day"]
+
+            current_day = get_current_day(
+                lesson,
+                current_day_index
+            )
+
+            day_number = current_day.get(
+                "day_number",
+                current_day_index + 1
+            )
+
+            day_title = current_day.get(
+                "day_title",
+                f"Day {day_number}"
+            )
+
+            is_last_day = (
+                current_day_index == total_days - 1
+            )
+
+            completed_days = set(
+                weekly_state["completed_days"]
+            )
+
+            st.markdown(
+                "### 📅 7-Day Plan"
+            )
+
+            # ------------------------------------------------
+            # Progress bar
+            # ------------------------------------------------
+
+            progress_pct = get_weekly_progress(
+                current_day_index,
+                total_days,
+                weekly_state["completed_days"]
+            )
+
+            st.progress(
+                progress_pct / 100
+            )
+
+            st.caption(
+                f"Day {current_day_index + 1} of {total_days} · "
+                f"{progress_pct}% complete"
+            )
+
+            # ------------------------------------------------
+            # Jump to any already-unlocked day (completed days,
+            # plus the current one). Keeps navigation flexible
+            # for review without letting students skip ahead.
+            # ------------------------------------------------
+
+            unlocked_indexes = sorted(
+                {0, current_day_index} | {
+                    idx for idx in range(total_days)
+                    if days[idx].get(
+                        "day_number", idx + 1
+                    ) in completed_days
+                }
+            )
+
+            def _day_label(idx):
+
+                label_day = days[idx].get(
+                    "day_number",
+                    idx + 1
+                )
+
+                label_title = days[idx].get(
+                    "day_title",
+                    f"Day {label_day}"
+                )
+
+                done_mark = (
+                    "✅ "
+                    if label_day in completed_days
+                    else ""
+                )
+
+                return f"{done_mark}Day {label_day} — {label_title}"
+
+            jump_choice = st.selectbox(
+                "Jump to day",
+                unlocked_indexes,
+                index=unlocked_indexes.index(current_day_index),
+                format_func=_day_label,
+                key="weekly_day_jump"
+            )
+
+            if jump_choice != current_day_index:
+
+                weekly_state["current_day"] = jump_choice
+
+                st.session_state.weekly_day_answer = ""
+
+                st.session_state.weekly_answer_evaluation = None
+
+                st.rerun()
+
+            st.markdown(
+                f"## 📅 Day {day_number} — {day_title}"
+            )
+
+            focus = current_day.get(
+                "focus",
+                ""
+            )
+
+            if focus:
+
+                st.write(
+                    focus
+                )
+
+            key_points = current_day.get(
+                "key_points",
+                []
+            )
+
+            if key_points:
+
+                st.write(
+                    "**Key Points:**"
+                )
+
+                for point in key_points:
+
+                    st.write(
+                        f"• {point}"
+                    )
+
+            # ----------------------------------------------------
+            # 🔊 AI Teaching Voice for this day (same zero-cost
+            # Edge TTS helper as the single-lesson AI Teacher)
+            # ----------------------------------------------------
+
+            day_speech_text = focus
+
+            if key_points:
+
+                day_speech_text += ". " + ". ".join(key_points)
+
+            day_cache_key = get_cache_key(
+                day_speech_text,
+                st.session_state.preferred_language
+            )
+
+            if st.button(
+                "🔊 Listen to this day",
+                key=f"listen_day_{day_number}"
+            ):
+
+                if day_cache_key not in st.session_state.tts_cache:
+
+                    with st.spinner(
+                        "🎙️ Generating voice..."
+                    ):
+
+                        try:
+
+                            audio_bytes, word_timings = (
+                                generate_speech(
+                                    day_speech_text,
+                                    st.session_state
+                                    .preferred_language
+                                )
+                            )
+
+                            st.session_state.tts_cache[
+                                day_cache_key
+                            ] = (
+                                audio_bytes,
+                                word_timings
+                            )
+
+                        except Exception as tts_error:
+
+                            st.error(
+                                "❌ Couldn't generate audio right "
+                                f"now: {tts_error}"
+                            )
+
+            if day_cache_key in st.session_state.tts_cache:
+
+                cached_audio, cached_timings = (
+                    st.session_state.tts_cache[day_cache_key]
+                )
+
+                if cached_audio:
+
+                    components.html(
+                        build_synced_player_html(
+                            cached_audio,
+                            cached_timings
+                        ),
+                        height=260,
+                        scrolling=True
+                    )
+
+            day_already_done = (
+                day_number in completed_days
+            )
+
+            # ==================================================
+            # DAYS 1-6: single practice question
+            # ==================================================
+
+            if not is_last_day:
+
+                question = current_day.get(
+                    "question",
+                    {}
+                )
+
+                # Some AI responses may return Day 7-style question
+                # arrays even for an earlier day - guard against it.
+                if isinstance(question, list):
+
+                    question = (
+                        question[0]
+                        if question
+                        else {}
+                    )
+
+                question_text = question.get(
+                    "question",
+                    ""
+                )
+
+                expected_concept = question.get(
+                    "expected_concept",
+                    question.get(
+                        "concept",
+                        day_title
+                    )
+                )
+
+                if question_text:
+
+                    st.markdown(
+                        "### 💡 Practice Question"
+                    )
+
+                    st.write(
+                        question_text
+                    )
+
+                    options = question.get(
+                        "options",
+                        []
+                    )
+
+                    if options:
+
+                        student_answer = st.radio(
+                            "Choose your answer:",
+                            options,
+                            key=f"weekly_mcq_{day_number}"
+                        )
+
+                    else:
+
+                        student_answer = st.text_area(
+                            "✍️ Your Answer",
+                            value=st.session_state.weekly_day_answer,
+                            placeholder="Write your answer here...",
+                            key=f"weekly_answer_{day_number}"
+                        )
+
+                        st.session_state.weekly_day_answer = (
+                            student_answer
+                        )
+
+                    if st.button(
+                        "🧠 Check My Answer",
+                        key=f"weekly_check_{day_number}"
+                    ):
+
+                        if options:
+
+                            correct_answer = question.get(
+                                "correct_answer",
+                                ""
+                            )
+
+                            is_correct = (
+                                student_answer == correct_answer
+                            )
+
+                            evaluation = {
+                                "score": 1 if is_correct else 0,
+                                "correct": is_correct,
+                                "feedback": (
+                                    "Correct!"
+                                    if is_correct
+                                    else (
+                                        "Not quite - the correct "
+                                        f"answer was: {correct_answer}"
+                                    )
+                                )
+                            }
+
+                        else:
+
+                            evaluation = evaluate_answer(
+                                student_answer,
+                                expected_concept,
+                                question=question_text,
+                                study_material=(
+                                    st.session_state.cleaned_text
+                                ),
+                                level=st.session_state.student_level,
+                                language=(
+                                    st.session_state.preferred_language
+                                )
+                            )
+
+                        st.session_state.weekly_answer_evaluation = (
+                            evaluation
+                        )
+
+                        save_day_answer(
+                            weekly_state,
+                            day_number,
+                            question_text,
+                            student_answer,
+                            evaluation,
+                            concept=expected_concept
+                        )
+
+                        update_concept_performance(
+                            weekly_state,
+                            expected_concept,
+                            evaluation.get("score", 0)
+                        )
+
+                        record_attempt(
+                            weekly_state,
+                            day_number
+                        )
+
+                        update_difficulty(
+                            weekly_state,
+                            evaluation
+                        )
+
+                        # A day unlocks the next one once attempted,
+                        # regardless of correctness - this is meant
+                        # to pace daily learning, not gate on a
+                        # perfect score.
+                        mark_day_completed(
+                            weekly_state,
+                            day_number
+                        )
+
+                    evaluation = (
+                        st.session_state.weekly_answer_evaluation
+                    )
+
+                    if evaluation:
+
+                        if evaluation.get(
+                            "correct",
+                            False
+                        ):
+
+                            st.success(
+                                evaluation.get(
+                                    "feedback",
+                                    "Correct!"
+                                )
+                            )
+
+                        else:
+
+                            st.warning(
+                                evaluation.get(
+                                    "feedback",
+                                    "Keep trying!"
+                                )
+                            )
+
+                else:
+
+                    # No question for this day - don't block
+                    # progress on something that doesn't exist.
+                    mark_day_completed(
+                        weekly_state,
+                        day_number
+                    )
+
+                st.divider()
+
+                nav_col1, nav_col2 = st.columns(2)
+
+                with nav_col1:
+
+                    if current_day_index > 0:
+
+                        if st.button(
+                            "⬅️ Previous Day",
+                            key="weekly_prev_day"
+                        ):
+
+                            weekly_state["current_day"] = (
+                                move_to_previous_day(
+                                    current_day_index
+                                )
+                            )
+
+                            st.session_state.weekly_day_answer = ""
+
+                            st.session_state.weekly_answer_evaluation = (
+                                None
+                            )
+
+                            st.rerun()
+
+                with nav_col2:
+
+                    if day_number in weekly_state["completed_days"]:
+
+                        if st.button(
+                            "➡️ Next Day",
+                            key="weekly_next_day"
+                        ):
+
+                            weekly_state["current_day"] = (
+                                move_to_next_day(
+                                    current_day_index,
+                                    total_days
+                                )
+                            )
+
+                            st.session_state.weekly_day_answer = ""
+
+                            st.session_state.weekly_answer_evaluation = (
+                                None
+                            )
+
+                            st.rerun()
+
+                    else:
+
+                        st.caption(
+                            "Answer the question above to unlock "
+                            "the next day."
+                        )
+
+            # ==================================================
+            # DAY 7: consolidated assessment + Learning Report
+            # ==================================================
+
+            else:
+
+                st.divider()
+
+                st.header(
+                    "📝 Day 7 Assessment"
+                )
+
+                quiz = lesson.get(
+                    "final_quiz",
+                    []
+                )
+
+                if not quiz:
+
+                    st.info(
+                        "No assessment questions were generated "
+                        "for this week."
+                    )
+
+                    mark_day_completed(
+                        weekly_state,
+                        day_number
+                    )
+
+                else:
+
+                    for i, quiz_question in enumerate(quiz):
+
+                        st.markdown(
+                            f"### Question {i + 1}"
+                        )
+
+                        st.write(
+                            quiz_question.get(
+                                "question",
+                                ""
+                            )
+                        )
+
+                        options = quiz_question.get(
+                            "options",
+                            []
+                        )
+
+                        if options:
+
+                            answer = st.radio(
+                                "Choose your answer:",
+                                options,
+                                key=f"weekly_quiz_{i}"
+                            )
+
+                            weekly_state["final_quiz_answers"][i] = (
+                                answer
+                            )
+
+                    if st.button(
+                        "🎯 Submit Week's Assessment",
+                        key="weekly_submit_quiz"
+                    ):
+
+                        score = 0
+
+                        correct_count = 0
+
+                        incorrect_count = 0
+
+                        wrong_concepts = []
+
+                        for i, quiz_question in enumerate(quiz):
+
+                            correct_answer = quiz_question.get(
+                                "correct_answer",
+                                ""
+                            )
+
+                            concept = quiz_question.get(
+                                "concept",
+                                ""
+                            )
+
+                            student_answer = (
+                                weekly_state["final_quiz_answers"]
+                                .get(i, "")
+                            )
+
+                            is_correct = (
+                                student_answer == correct_answer
+                            )
+
+                            if is_correct:
+
+                                score += 1
+
+                                correct_count += 1
+
+                            else:
+
+                                incorrect_count += 1
+
+                                if (
+                                    concept
+                                    and concept not in wrong_concepts
+                                ):
+
+                                    wrong_concepts.append(concept)
+
+                            if concept:
+
+                                update_concept_performance(
+                                    weekly_state,
+                                    concept,
+                                    1 if is_correct else 0
+                                )
+
+                        weekly_state["final_quiz_score"] = score
+
+                        weekly_state["final_quiz_submitted"] = True
+
+                        weekly_state["final_quiz_breakdown"] = {
+                            "correct": correct_count,
+                            "incorrect": incorrect_count,
+                            "wrong_concepts": wrong_concepts
+                        }
+
+                        mark_day_completed(
+                            weekly_state,
+                            day_number
+                        )
+
+                    if weekly_state["final_quiz_submitted"]:
+
+                        total_questions = len(quiz)
+
+                        score = weekly_state["final_quiz_score"]
+
+                        breakdown = (
+                            weekly_state["final_quiz_breakdown"]
+                        )
+
+                        st.success(
+                            f"🎉 Your score: "
+                            f"{score}/{total_questions}"
+                        )
+
+                        st.write(
+                            f"✅ Correct: "
+                            f"{breakdown.get('correct', 0)}"
+                            f"&nbsp;&nbsp;&nbsp;"
+                            f"❌ Incorrect: "
+                            f"{breakdown.get('incorrect', 0)}",
+                            unsafe_allow_html=True
+                        )
+
+                        wrong_concepts = breakdown.get(
+                            "wrong_concepts",
+                            []
+                        )
+
+                        if wrong_concepts:
+
+                            st.markdown(
+                                "**Topics to review:**"
+                            )
+
+                            for concept in wrong_concepts:
+
+                                st.markdown(
+                                    f"- {concept}"
+                                )
+
+                        if total_questions > 0:
+
+                            percentage = (
+                                score / total_questions
+                            ) * 100
+
+                            if percentage == 100:
+
+                                st.balloons()
+
+                                st.success(
+                                    "Excellent! You've completed "
+                                    "the full week with a perfect "
+                                    "score."
+                                )
+
+                            elif percentage >= 60:
+
+                                st.info(
+                                    "Good job finishing the week! "
+                                    "Review the topics you found "
+                                    "difficult."
+                                )
+
+                            else:
+
+                                st.warning(
+                                    "Keep practicing! Revisit the "
+                                    "days you found difficult and "
+                                    "try the assessment again."
+                                )
+
+                        # ==========================================
+                        # 🎓 WEEKLY LEARNING REPORT
+                        #
+                        # get_learning_summary() is the SAME
+                        # function the single-lesson flow uses -
+                        # it just reads generic keys off whatever
+                        # state dict it's given.
+                        # ==========================================
+
+                        st.divider()
+
+                        st.header(
+                            "🎓 Your Weekly Learning Report"
+                        )
+
+                        summary = get_learning_summary(
+                            weekly_state
+                        )
+
+                        report_col1, report_col2 = st.columns(2)
+
+                        with report_col1:
+
+                            st.metric(
+                                "Daily Questions Score",
+                                f"{summary.get('percentage', 0)}%"
+                            )
+
+                        with report_col2:
+
+                            st.metric(
+                                "Day 7 Assessment",
+                                f"{score}/{total_questions}"
+                            )
+
+                        strong_concepts = summary.get(
+                            "strong_concepts",
+                            []
+                        )
+
+                        weak_concepts = summary.get(
+                            "weak_concepts",
+                            []
+                        )
+
+                        st.markdown(
+                            "#### Strong Areas"
+                        )
+
+                        if strong_concepts:
+
+                            for concept in strong_concepts:
+
+                                st.markdown(
+                                    f"✓ {concept}"
+                                )
+
+                        else:
+
+                            st.caption(
+                                "No strong areas identified yet."
+                            )
+
+                        st.markdown(
+                            "#### Needs Improvement"
+                        )
+
+                        if weak_concepts:
+
+                            for concept in weak_concepts:
+
+                                st.markdown(
+                                    f"⚠ {concept}"
+                                )
+
+                        else:
+
+                            st.caption(
+                                "No weak areas identified - "
+                                "nice work!"
+                            )
+
+                        if weak_concepts:
+
+                            st.info(
+                                "**Teacher Recommendation:** "
+                                f"Review {', '.join(weak_concepts)} "
+                                "before starting a new topic."
+                            )
+
+                        else:
+
+                            st.info(
+                                "**Teacher Recommendation:** "
+                                "Great week! You're ready for "
+                                "the next topic."
+                            )
+
+                st.divider()
+
+                if st.button(
+                    "⬅️ Back to Day 6",
+                    key="weekly_back_to_6"
+                ):
+
+                    weekly_state["current_day"] = (
+                        move_to_previous_day(
+                            current_day_index
+                        )
+                    )
+
+                    st.rerun()
+
+            st.stop()
+
+
+        # ----------------------------------------------------
+        # Lesson sections
+        # ----------------------------------------------------
+
+        st.markdown(
+            "### 📖 Lesson Sections"
         )
 
-        sections = plan.get(
+        sections = lesson.get(
             "sections",
             []
         )
@@ -693,7 +1881,7 @@ if st.session_state.cleaned_text:
                 f"Section {i + 1}"
             )
 
-            section_duration = section.get(
+            duration = section.get(
                 "duration_minutes",
                 0
             )
@@ -703,31 +1891,30 @@ if st.session_state.cleaned_text:
                 ""
             )
 
-            with st.expander(
-                f"📚 {i + 1}. {title} — "
-                f"{section_duration} min"
-            ):
+            st.markdown(
+                f"📚 **{i + 1}. {title} — {duration} min**"
+            )
+
+            st.write(
+                description
+            )
+
+            key_points = section.get(
+                "key_points",
+                []
+            )
+
+            if key_points:
 
                 st.write(
-                    description
+                    "**Key Points:**"
                 )
 
-                key_points = section.get(
-                    "key_points",
-                    []
-                )
+                for point in key_points:
 
-                if key_points:
-
-                    st.markdown(
-                        "**Key Points:**"
+                    st.write(
+                        f"• {point}"
                     )
-
-                    for point in key_points:
-
-                        st.write(
-                            f"• {point}"
-                        )
 
 
         # ====================================================
@@ -739,81 +1926,83 @@ if st.session_state.cleaned_text:
         if not st.session_state.lesson_started:
 
             st.subheader(
-                "🧑‍🏫 Ready to Learn?"
+                "🧑‍🏫 AI Teacher"
             )
 
             st.write(
-                "Start the lesson to enter AI Teacher mode."
+                "Ready to start your personalized lesson?"
             )
 
             if st.button(
-                "🚀 Start Lesson",
-                key="start_lesson_button"
+                "▶️ Start Lesson",
+                key="start_lesson"
             ):
+
+                state = initialize_lesson(
+                    lesson
+                )
+
+                st.session_state.teaching_state = state
 
                 st.session_state.lesson_started = True
 
-                st.session_state.current_section = 0
-
                 st.session_state.teacher_explanation = ""
+
+                st.session_state.answer_evaluation = None
+
+                st.session_state.student_answer = ""
 
                 st.rerun()
 
 
         # ====================================================
-        # AI TEACHER
+        # ACTIVE AI TEACHER
         # ====================================================
 
         if st.session_state.lesson_started:
 
-            st.divider()
+            state = st.session_state.teaching_state
 
-            st.header(
-                "🧑‍🏫 AI Teacher"
+            current_index = state.get(
+                "current_section",
+                0
             )
 
-            if not sections:
+            total_sections = state.get(
+                "total_sections",
+                len(sections)
+            )
 
-                st.warning(
-                    "No lesson sections are available."
+
+            current_section = get_current_section(
+                lesson,
+                current_index
+            )
+
+
+            if current_section:
+
+                st.header(
+                    "🧑‍🏫 AI Teacher"
                 )
-
-            else:
-
-                current_index = (
-                    st.session_state.current_section
-                )
-
-                if current_index >= len(sections):
-
-                    current_index = len(sections) - 1
-
-                    st.session_state.current_section = (
-                        current_index
-                    )
-
-
-                current_section = sections[
-                    current_index
-                ]
 
 
                 # ------------------------------------------------
                 # Progress
                 # ------------------------------------------------
 
-                progress = (
-                    (current_index + 1)
-                    / len(sections)
+                progress = get_progress(
+                    current_index,
+                    total_sections
+                )
+
+                st.write(
+                    f"Section {current_index + 1} "
+                    f"of {total_sections}"
                 )
 
                 st.progress(
-                    progress
-                )
-
-                st.caption(
-                    f"Section {current_index + 1} "
-                    f"of {len(sections)}"
+                    progress / 100
                 )
 
 
@@ -821,60 +2010,45 @@ if st.session_state.cleaned_text:
                 # Current section
                 # ------------------------------------------------
 
-                section_title = current_section.get(
-                    "title",
-                    "Lesson Section"
-                )
-
                 st.subheader(
-                    f"📚 {section_title}"
+                    f"📚 {current_section.get('title', 'Lesson Section')}"
                 )
 
 
                 # ------------------------------------------------
-                # Teach button
+                # Generate explanation
                 # ------------------------------------------------
 
-                if st.button(
-                    "🧑‍🏫 Teach Me This Section",
-                    key=f"teach_{current_index}"
-                ):
+                if not st.session_state.teacher_explanation:
 
                     with st.spinner(
-                        "🤖 AI Teacher is preparing the lesson..."
+                        "👨‍🏫 Preparing your explanation..."
                     ):
 
-                        explanation = (
-                            generate_teacher_explanation(
+                        try:
 
-                                plan.get(
-                                    "topic",
-                                    "Study Topic"
-                                ),
-
-                                section_title,
-
-                                st.session_state.cleaned_text,
-
-                                plan.get(
-                                    "level",
-                                    "Beginner"
-                                ),
-
-                                plan.get(
-                                    "language",
-                                    "English"
+                            explanation = (
+                                generate_teacher_explanation(
+                                    current_section,
+                                    st.session_state.cleaned_text,
+                                    st.session_state.student_level,
+                                    st.session_state.preferred_language
                                 )
                             )
-                        )
 
-                        st.session_state.teacher_explanation = (
-                            explanation
-                        )
+                            st.session_state.teacher_explanation = (
+                                explanation
+                            )
+
+                        except Exception as e:
+
+                            st.error(
+                                f"❌ Could not generate teacher explanation: {e}"
+                            )
 
 
                 # ------------------------------------------------
-                # Show explanation
+                # Explanation
                 # ------------------------------------------------
 
                 if st.session_state.teacher_explanation:
@@ -883,227 +2057,665 @@ if st.session_state.cleaned_text:
                         "### 👨‍🏫 Explanation"
                     )
 
-                    st.write(
+                    st.markdown(
                         st.session_state.teacher_explanation
                     )
 
+                    # --------------------------------------------
+                    # 🔊 AI Teaching Voice (zero-cost, Edge TTS)
+                    #
+                    # Listen-along audio with word-by-word
+                    # highlighting, generated on demand so a
+                    # student who just wants to read doesn't pay
+                    # the (small) TTS latency cost for nothing.
+                    # --------------------------------------------
+
+                    explanation_cache_key = get_cache_key(
+                        st.session_state.teacher_explanation,
+                        st.session_state.preferred_language
+                    )
+
+                    if st.button(
+                        "🔊 Listen to this explanation",
+                        key=f"listen_{current_index}"
+                    ):
+
+                        if (
+                            explanation_cache_key
+                            not in st.session_state.tts_cache
+                        ):
+
+                            with st.spinner(
+                                "🎙️ Generating voice..."
+                            ):
+
+                                try:
+
+                                    audio_bytes, word_timings = (
+                                        generate_speech(
+                                            st.session_state
+                                            .teacher_explanation,
+                                            st.session_state
+                                            .preferred_language
+                                        )
+                                    )
+
+                                    st.session_state.tts_cache[
+                                        explanation_cache_key
+                                    ] = (
+                                        audio_bytes,
+                                        word_timings
+                                    )
+
+                                except Exception as tts_error:
+
+                                    st.error(
+                                        "❌ Couldn't generate audio "
+                                        f"right now: {tts_error}"
+                                    )
+
+                    if (
+                        explanation_cache_key
+                        in st.session_state.tts_cache
+                    ):
+
+                        cached_audio, cached_timings = (
+                            st.session_state.tts_cache[
+                                explanation_cache_key
+                            ]
+                        )
+
+                        if cached_audio:
+
+                            components.html(
+                                build_synced_player_html(
+                                    cached_audio,
+                                    cached_timings
+                                ),
+                                height=260,
+                                scrolling=True
+                            )
+
 
                 # ------------------------------------------------
-                # Navigation
+                # Interactive question
                 # ------------------------------------------------
 
-                nav1, nav2 = st.columns(2)
+                interactive_questions = lesson.get(
+                    "interactive_questions",
+                    []
+                )
+
+
+                if interactive_questions:
+
+                    question_index = min(
+                        current_index,
+                        len(interactive_questions) - 1
+                    )
+
+                    interactive_question = (
+                        interactive_questions[
+                            question_index
+                        ]
+                    )
+
+                    question_text = (
+                        interactive_question.get(
+                            "question",
+                            "What did you learn from this section?"
+                        )
+                    )
+
+                    expected_concept = (
+                        interactive_question.get(
+                            "expected_concept",
+                            current_section.get(
+                                "title",
+                                ""
+                            )
+                        )
+                    )
+
+
+                    st.markdown(
+                        "### 💡 Think About It"
+                    )
+
+                    st.write(
+                        question_text
+                    )
+
+
+                    # ------------------------------------------------
+                    # Student answer
+                    # ------------------------------------------------
+
+                    student_answer = st.text_area(
+                        "✍️ Your Answer",
+                        value=st.session_state.student_answer,
+                        placeholder="Write your answer here...",
+                        key=f"student_answer_{current_index}"
+                    )
+
+
+                    st.session_state.student_answer = student_answer
+
+
+                    # ------------------------------------------------
+                    # Check answer
+                    # ------------------------------------------------
+
+                    if st.button(
+                        "🧠 Check My Answer",
+                        key=f"check_answer_{current_index}"
+                    ):
+
+                        evaluation = evaluate_answer(
+                            student_answer,
+                            expected_concept,
+                            question=question_text,
+                            study_material=st.session_state.cleaned_text,
+                            level=st.session_state.student_level,
+                            language=st.session_state.preferred_language
+                        )
+
+                        st.session_state.answer_evaluation = (
+                            evaluation
+                        )
+
+                        save_answer(
+                            state,
+                            question_text,
+                            student_answer,
+                            evaluation
+                        )
+
+                        # ------------------------------------------------
+                        # Adaptive engine - this data already existed in
+                        # teaching_engine.py, it just wasn't being called.
+                        # Now every answer actually updates the student's
+                        # concept performance and teaching difficulty.
+                        # ------------------------------------------------
+
+                        update_concept_performance(
+                            state,
+                            expected_concept,
+                            evaluation.get("score", 0)
+                        )
+
+                        record_attempt(
+                            state,
+                            current_index
+                        )
+
+                        update_difficulty(
+                            state,
+                            evaluation
+                        )
+
+                        if evaluation.get(
+                            "correct",
+                            False
+                        ):
+
+                            mark_section_completed(
+                                state,
+                                current_index
+                            )
+
+
+                    # ------------------------------------------------
+                    # Display feedback
+                    # ------------------------------------------------
+
+                    evaluation = (
+                        st.session_state.answer_evaluation
+                    )
+
+
+                    if evaluation:
+
+                        if evaluation.get(
+                            "correct",
+                            False
+                        ):
+
+                            st.success(
+                                f"🎉 {evaluation.get('feedback', '')}"
+                            )
+
+                        else:
+
+                            st.warning(
+                                f"💡 {evaluation.get('feedback', '')}"
+                            )
+
+
+                        st.write(
+                            f"Score: {evaluation.get('score', 0)} / 1"
+                        )
+
+
+                # =================================================
+                # NAVIGATION
+                # =================================================
+
+                st.divider()
+
+                nav1, nav2, nav3 = st.columns(
+                    [1, 1, 1]
+                )
 
 
                 with nav1:
 
-                    if current_index > 0:
+                    if st.button(
+                        "⬅️ Previous",
+                        key=f"previous_{current_index}",
+                        disabled=(current_index == 0)
+                    ):
 
-                        if st.button(
-                            "⬅️ Previous Section",
-                            key=f"previous_{current_index}"
-                        ):
+                        new_index = (
+                            move_to_previous_section(
+                                current_index
+                            )
+                        )
 
-                            st.session_state.current_section -= 1
+                        state["current_section"] = (
+                            new_index
+                        )
 
-                            st.session_state.teacher_explanation = ""
+                        st.session_state.teacher_explanation = ""
 
-                            st.rerun()
+                        st.session_state.answer_evaluation = None
+
+                        st.session_state.student_answer = ""
+
+                        st.rerun()
 
 
                 with nav2:
 
-                    if current_index < len(sections) - 1:
+                    if st.button(
+                        "🔄 Restart Lesson",
+                        key="restart_lesson"
+                    ):
 
-                        if st.button(
-                            "Next Section ➡️",
-                            key=f"next_{current_index}"
-                        ):
-
-                            st.session_state.current_section += 1
-
-                            st.session_state.teacher_explanation = ""
-
-                            st.rerun()
-
-                    else:
-
-                        st.success(
-                            "🎉 You completed all lesson sections!"
+                        st.session_state.teaching_state = (
+                            initialize_lesson(
+                                lesson
+                            )
                         )
 
+                        st.session_state.teacher_explanation = ""
 
-            # ====================================================
-            # INTERACTIVE QUESTIONS
-            # ====================================================
+                        st.session_state.answer_evaluation = None
 
-            st.divider()
+                        st.session_state.student_answer = ""
 
-            st.header(
-                "💡 Interactive Questions"
-            )
-
-            interactive_questions = plan.get(
-                "interactive_questions",
-                []
-            )
+                        st.rerun()
 
 
-            if interactive_questions:
+                with nav3:
 
-                for i, item in enumerate(
-                    interactive_questions
-                ):
+                    if st.button(
+                        "Next ➡️",
+                        key=f"next_{current_index}",
+                        disabled=(
+                            current_index
+                            >= total_sections - 1
+                        )
+                    ):
 
-                    st.markdown(
-                        f"**Question {i + 1}:** "
-                        f"{item.get('question', '')}"
-                    )
+                        new_index = (
+                            move_to_next_section(
+                                current_index,
+                                total_sections
+                            )
+                        )
 
-                    st.info(
-                        "💡 Think about your answer before continuing."
-                    )
+                        state["current_section"] = (
+                            new_index
+                        )
+
+                        st.session_state.teacher_explanation = ""
+
+                        st.session_state.answer_evaluation = None
+
+                        st.session_state.student_answer = ""
+
+                        st.rerun()
 
 
             # ====================================================
             # FINAL QUIZ
             # ====================================================
 
-            st.divider()
-
-            st.header(
-                "📝 Final Quiz"
-            )
-
-            quiz = plan.get(
-                "final_quiz",
-                []
-            )
-
-
-            if quiz:
-
-                for i, q in enumerate(quiz):
-
-                    question_text = q.get(
-                        "question",
-                        ""
-                    )
-
-                    options = q.get(
-                        "options",
-                        []
-                    )
-
-                    st.markdown(
-                        f"**Question {i + 1}:** "
-                        f"{question_text}"
-                    )
-
-                    answer = st.radio(
-                        "Choose your answer:",
-                        options,
-                        key=f"quiz_question_{i}",
-                        index=None
-                    )
-
-                    st.session_state.quiz_answers[i] = (
-                        answer
-                    )
-
-
-                if st.button(
-                    "✅ Submit Quiz",
-                    key="submit_quiz"
-                ):
-
-                    score = 0
-
-                    for i, q in enumerate(quiz):
-
-                        selected = (
-                            st.session_state
-                            .quiz_answers
-                            .get(i)
-                        )
-
-                        correct = q.get(
-                            "correct_answer"
-                        )
-
-                        if (
-                            selected
-                            and correct
-                            and selected.strip()
-                            == correct.strip()
-                        ):
-
-                            score += 1
-
-
-                    st.session_state.quiz_score = score
-
-                    st.session_state.quiz_submitted = True
-
-
-                # ------------------------------------------------
-                # Quiz result
-                # ------------------------------------------------
-
-                if st.session_state.quiz_submitted:
-
-                    total = len(quiz)
-
-                    score = (
-                        st.session_state.quiz_score
-                    )
-
-                    st.success(
-                        f"🎉 Your score: "
-                        f"{score}/{total}"
-                    )
-
-                    if score == total:
-
-                        st.balloons()
-
-                        st.success(
-                            "Excellent! You have "
-                            "understood the lesson very well."
-                        )
-
-                    elif score >= total / 2:
-
-                        st.info(
-                            "Good job! Review the lesson "
-                            "once more to strengthen your understanding."
-                        )
-
-                    else:
-
-                        st.warning(
-                            "Don't worry! Review the lesson "
-                            "sections and try the quiz again."
-                        )
-
-
-            # ====================================================
-            # LESSON COMPLETE
-            # ====================================================
-
             if (
-                sections
-                and st.session_state.current_section
-                == len(sections) - 1
+                total_sections > 0
+                and current_index == total_sections - 1
             ):
 
                 st.divider()
 
-                st.success(
-                    "🎓 Lesson completed! "
-                    "You can review the sections or "
-                    "attempt the final quiz."
+                st.header(
+                    "📝 Final Quiz"
                 )
+
+                quiz = lesson.get(
+                    "final_quiz",
+                    []
+                )
+
+
+                if not quiz:
+
+                    st.info(
+                        "No final quiz questions were generated."
+                    )
+
+                else:
+
+                    for i, quiz_question in enumerate(
+                        quiz
+                    ):
+
+                        st.markdown(
+                            f"### Question {i + 1}"
+                        )
+
+                        st.write(
+                            quiz_question.get(
+                                "question",
+                                ""
+                            )
+                        )
+
+                        options = quiz_question.get(
+                            "options",
+                            []
+                        )
+
+                        if options:
+
+                            answer = st.radio(
+                                "Choose your answer:",
+                                options,
+                                key=f"quiz_{i}"
+                            )
+
+                            st.session_state.final_quiz_answers[
+                                i
+                            ] = answer
+
+
+                    if st.button(
+                        "🎯 Submit Quiz",
+                        key="submit_quiz"
+                    ):
+
+                        score = 0
+
+                        correct_count = 0
+
+                        incorrect_count = 0
+
+                        wrong_concepts = []
+
+                        for i, quiz_question in enumerate(
+                            quiz
+                        ):
+
+                            correct_answer = (
+                                quiz_question.get(
+                                    "correct_answer",
+                                    ""
+                                )
+                            )
+
+                            concept = quiz_question.get(
+                                "concept",
+                                ""
+                            )
+
+                            student_answer = (
+                                st.session_state.final_quiz_answers.get(
+                                    i,
+                                    ""
+                                )
+                            )
+
+                            is_correct = (
+                                student_answer == correct_answer
+                            )
+
+                            if is_correct:
+
+                                score += 1
+
+                                correct_count += 1
+
+                            else:
+
+                                incorrect_count += 1
+
+                                if concept and concept not in wrong_concepts:
+
+                                    wrong_concepts.append(concept)
+
+                            # --------------------------------------------
+                            # Feed the final quiz into the SAME adaptive
+                            # engine the section questions use, so weak
+                            # concepts reflect the whole lesson, not just
+                            # the "Think About It" questions.
+                            # --------------------------------------------
+
+                            if concept:
+
+                                update_concept_performance(
+                                    state,
+                                    concept,
+                                    1 if is_correct else 0
+                                )
+
+                        st.session_state.quiz_score = score
+
+                        st.session_state.quiz_submitted = True
+
+                        st.session_state.quiz_breakdown = {
+                            "correct": correct_count,
+                            "incorrect": incorrect_count,
+                            "wrong_concepts": wrong_concepts
+                        }
+
+
+                    # ------------------------------------------------
+                    # Quiz result
+                    # ------------------------------------------------
+
+                    if st.session_state.quiz_submitted:
+
+                        total_questions = len(
+                            quiz
+                        )
+
+                        score = (
+                            st.session_state.quiz_score
+                        )
+
+                        breakdown = (
+                            st.session_state.quiz_breakdown
+                        )
+
+
+                        st.success(
+                            f"🎉 Your score: "
+                            f"{score}/{total_questions}"
+                        )
+
+                        st.write(
+                            f"✅ Correct: {breakdown.get('correct', 0)}"
+                            f"&nbsp;&nbsp;&nbsp;"
+                            f"❌ Incorrect: {breakdown.get('incorrect', 0)}",
+                            unsafe_allow_html=True
+                        )
+
+                        wrong_concepts = breakdown.get(
+                            "wrong_concepts",
+                            []
+                        )
+
+                        if wrong_concepts:
+
+                            st.markdown(
+                                "**Topics to review:**"
+                            )
+
+                            for concept in wrong_concepts:
+
+                                st.markdown(
+                                    f"- {concept}"
+                                )
+
+
+                        if total_questions > 0:
+
+                            percentage = (
+                                score
+                                / total_questions
+                            ) * 100
+
+                            if percentage == 100:
+
+                                st.balloons()
+
+                                st.success(
+                                    "Excellent! You have understood the lesson very well."
+                                )
+
+                            elif percentage >= 60:
+
+                                st.info(
+                                    "Good job! Review the topics you found difficult."
+                                )
+
+                            else:
+
+                                st.warning(
+                                    "Keep practicing! Review the lesson sections and try again."
+                                )
+
+
+                        # ==================================================
+                        # 🎓 LEARNING REPORT
+                        # ==================================================
+
+                        st.divider()
+
+                        st.header(
+                            "🎓 Your Learning Report"
+                        )
+
+                        summary = get_learning_summary(
+                            state
+                        )
+
+                        report_col1, report_col2 = st.columns(2)
+
+                        with report_col1:
+
+                            st.metric(
+                                "Section Questions Score",
+                                f"{summary.get('percentage', 0)}%"
+                            )
+
+                        with report_col2:
+
+                            st.metric(
+                                "Final Quiz Score",
+                                f"{score}/{total_questions}"
+                            )
+
+                        strong_concepts = summary.get(
+                            "strong_concepts",
+                            []
+                        )
+
+                        weak_concepts = summary.get(
+                            "weak_concepts",
+                            []
+                        )
+
+                        st.markdown(
+                            "#### Strong Areas"
+                        )
+
+                        if strong_concepts:
+
+                            for concept in strong_concepts:
+
+                                st.markdown(
+                                    f"✓ {concept}"
+                                )
+
+                        else:
+
+                            st.caption(
+                                "No strong areas identified yet."
+                            )
+
+                        st.markdown(
+                            "#### Needs Improvement"
+                        )
+
+                        if weak_concepts:
+
+                            for concept in weak_concepts:
+
+                                st.markdown(
+                                    f"⚠ {concept}"
+                                )
+
+                        else:
+
+                            st.caption(
+                                "No weak areas identified - nice work!"
+                            )
+
+                        misconceptions = summary.get(
+                            "misconceptions",
+                            []
+                        )
+
+                        if misconceptions:
+
+                            st.markdown(
+                                "#### Detected Misconceptions"
+                            )
+
+                            for item in misconceptions:
+
+                                st.markdown(
+                                    f"- {item.get('misconception', '')}"
+                                )
+
+                        if weak_concepts:
+
+                            st.info(
+                                "**Teacher Recommendation:** "
+                                f"Review {', '.join(weak_concepts)} "
+                                "and try a few extra practice questions "
+                                "on these topics before moving on."
+                            )
+
+                        else:
+
+                            st.info(
+                                "**Teacher Recommendation:** "
+                                "You're ready to move on to the next topic!"
+                            )
+
 
 
 # ============================================================
@@ -1113,6 +2725,5 @@ if st.session_state.cleaned_text:
 else:
 
     st.info(
-        "👆 Upload a PDF above to begin learning "
-        "with EduSense AI."
+        "👆 Upload a PDF above to begin learning with EduSense AI."
     )
