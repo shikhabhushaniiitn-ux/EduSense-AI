@@ -40,15 +40,120 @@ def clean_response(text):
 # GENERATE TEACHER EXPLANATION
 # ============================================================
 
+def _build_visual_narration_instructions(visual_spec):
+    """
+    Build the extra prompt block that tells the AI to speak
+    ABOUT the visual that will be shown alongside this
+    explanation, so the generated text - which is also fed
+    straight into text-to-speech - actually narrates the
+    visual instead of ignoring it.
+
+    Returns "" if there is no visual (or visual_type is "none"),
+    in which case the explanation prompt is unchanged.
+    """
+
+    if not visual_spec:
+        return ""
+
+    visual_type = visual_spec.get("visual_type", "none")
+
+    if visual_type == "none":
+        return ""
+
+    title = visual_spec.get("title", "")
+
+    descriptions = {
+        "equation": (
+            f'An equation titled "{title}" will be shown with the '
+            "explanation. Verbally walk the student through the "
+            "equation and its step-by-step solution in your "
+            "explanation - describe what each part of the equation "
+            "means, as if you were pointing at it while teaching."
+        ),
+        "graph": (
+            f'A graph titled "{title}" will be plotted alongside the '
+            "explanation. Describe, in words, what the graph looks "
+            "like and what it shows (shape of the curve, where it "
+            "rises/falls, key points like intercepts or turning "
+            "points) so a student listening to the audio understands "
+            "the graph without needing to read it."
+        ),
+        "process": (
+            f'A step-by-step process/flow diagram titled "{title}" '
+            "will be shown. Narrate the sequence out loud, step by "
+            "step, in the same order as the diagram, so the audio "
+            "walks the student through exactly what the diagram "
+            "shows."
+        ),
+        "timeline": (
+            f'A timeline diagram titled "{title}" will be shown. '
+            "Narrate the events in chronological order, connecting "
+            "each event to the next, so the audio matches what the "
+            "timeline shows."
+        ),
+        "code": (
+            f'A code snippet titled "{title}" will be shown. Walk '
+            "through what the code does line by line in plain "
+            "language, and describe what output it produces, so a "
+            "student listening to the audio understands the code "
+            "without needing to read it."
+        ),
+        "image": (
+            f'A labeled reference image titled "{title}" will be '
+            "shown. Describe, in words, the structure/parts shown in "
+            "the image and how they relate to each other, so the "
+            "audio explanation matches what the image shows."
+        ),
+        "map": (
+            f'A map titled "{title}" will be shown. Describe, in '
+            "words, the geography/territory/route it shows, so the "
+            "audio explanation matches what the map shows."
+        ),
+        "simulation": (
+            f'An interactive physics simulation titled "{title}" '
+            "will be shown, which the student can adjust with "
+            "sliders. Explain what the simulation demonstrates, what "
+            "happens as the student changes each control, and what "
+            "real-world phenomenon it models, so the audio "
+            "explanation makes the simulation meaningful even before "
+            "the student touches it."
+        )
+    }
+
+    narration_note = descriptions.get(visual_type)
+
+    if not narration_note:
+        return ""
+
+    return f"""
+
+VISUAL BEING SHOWN WITH THIS EXPLANATION:
+{narration_note}
+
+Weave this into your explanation naturally (e.g. "look at the graph
+below", "as the diagram shows") - do not just describe the visual in
+one bolted-on sentence, and do not mention that this instruction was
+given to you.
+"""
+
+
 def generate_teacher_explanation(
     section,
     study_material,
     level="Beginner",
-    language="English"
+    language="English",
+    visual_spec=None
 ):
     """
     Generate a student-friendly explanation
     for the current lesson section.
+
+    If `visual_spec` (the dict from
+    modules.subject_visuals.detect_visual) is supplied, the
+    explanation is written to also narrate that visual out loud -
+    important because this same text is fed to text-to-speech, so
+    without this the audio never actually explains the graph /
+    diagram / simulation the student is looking at.
     """
 
     if not section:
@@ -99,7 +204,7 @@ Important points:
 
 Study material:
 {study_material[:10000]}
-
+{_build_visual_narration_instructions(visual_spec)}
 IMPORTANT LANGUAGE RULE:
 
 If the preferred language is English:
@@ -433,6 +538,17 @@ Evaluation rules:
 7. Do not shame the student.
 8. Keep feedback concise.
 9. Give one useful improvement suggestion.
+10. If the answer is Partially Correct or Needs Improvement,
+    identify the SPECIFIC misconception behind it - not just
+    "the student is wrong", but the actual incorrect idea they
+    seem to hold (e.g. "thinks correlation always implies
+    causation", "confuses velocity with acceleration", "believes
+    the mitochondria produces sugar instead of energy"). Base
+    this only on what their answer actually suggests - never
+    invent a misconception that isn't supported by their wording.
+    If the answer is Correct, or if it's wrong in a generic
+    "didn't study this" way with no specific misconception
+    visible, write exactly: None
 
 Use this structure:
 
@@ -444,6 +560,9 @@ Feedback:
 
 Improvement:
 ...
+
+Misconception:
+...(the specific wrong idea, in one sentence - or "None")
 
 Return only the feedback.
 """
@@ -475,7 +594,9 @@ Return only the feedback.
             "उत्तर की जाँच पूरी नहीं हो सकी।\n\n"
             "### Feedback\n"
             "कृपया अध्ययन सामग्री को दोबारा देखें "
-            "और मुख्य अवधारणा को अपने शब्दों में समझाने का प्रयास करें।"
+            "और मुख्य अवधारणा को अपने शब्दों में समझाने का प्रयास करें।\n\n"
+            "### Misconception\n"
+            "None"
         )
 
     elif language == "Hinglish":
@@ -485,7 +606,9 @@ Return only the feedback.
             "Answer evaluate nahi ho saka.\n\n"
             "### Feedback\n"
             "Study material ko dobara dekhiye aur "
-            "main concept ko apne words mein explain kijiye."
+            "main concept ko apne words mein explain kijiye.\n\n"
+            "### Misconception\n"
+            "None"
         )
 
     else:
@@ -495,5 +618,7 @@ Return only the feedback.
             "The answer could not be evaluated.\n\n"
             "### Feedback\n"
             "Review the study material and try "
-            "explaining the main concept in your own words."
+            "explaining the main concept in your own words.\n\n"
+            "### Misconception\n"
+            "None"
         )

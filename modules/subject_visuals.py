@@ -55,7 +55,12 @@ VALID_SUBJECTS = {
 
 VALID_VISUAL_TYPES = {
     "equation", "graph", "process", "timeline",
-    "code", "image", "map", "none"
+    "code", "image", "map", "simulation", "none"
+}
+
+VALID_SIMULATION_TYPES = {
+    "projectile", "pendulum", "free_fall", "spring",
+    "wave", "circuit_ohm", "none"
 }
 
 
@@ -74,7 +79,7 @@ Respond in exactly this shape:
 
 {{
   "subject": "Mathematics | Physics | Biology | History | Programming | Chemistry | General",
-  "visual_type": "equation | graph | process | timeline | code | image | map | none",
+  "visual_type": "equation | graph | process | timeline | code | image | map | simulation | none",
   "title": "short title for the visual",
   "equation": "a plain-text equation, ONLY if visual_type is equation or graph, else empty string",
   "graph_expression": "a Python/SymPy-style expression in terms of x ONLY, ONLY if visual_type is graph, e.g. x**2 - 3*x + 2, else empty string",
@@ -82,8 +87,9 @@ Respond in exactly this shape:
   "process_steps": ["Step A", "Step B", "Step C"],
   "code": "a short code snippet, ONLY if visual_type is code, else empty string",
   "expected_output": "what that code would print when run, ONLY if visual_type is code, else empty string",
-  "image_query": "a short, specific search phrase for a real educational image, ONLY if visual_type is image, else empty string",
-  "map_query": "a short, specific search phrase for a real historical/geographic map image, ONLY if visual_type is map, else empty string"
+  "image_query": "a SHORT (2-4 word) search phrase naming just the core subject, ONLY if visual_type is image, else empty string - e.g. 'pericardium heart', not a long descriptive sentence",
+  "map_query": "a SHORT (3-6 word) search phrase for a real historical/geographic map image, ONLY if visual_type is map, else empty string",
+  "simulation_type": "projectile | pendulum | free_fall | spring | wave | circuit_ohm | none, ONLY if visual_type is simulation, else none"
 }}
 
 RULES:
@@ -122,6 +128,25 @@ RULES:
    which reads from the database"), use "process" with
    process_steps listing each component in order - this renders
    as a component/architecture diagram, not a plain step list.
+10. If the section is Physics content describing something that
+    MOVES or CHANGES OVER TIME and an interactive, hands-on demo
+    would teach it better than a static diagram, use "simulation"
+    with a matching simulation_type:
+    - "projectile": something launched/thrown at an angle
+      (projectile motion, range, trajectory)
+    - "pendulum": a swinging pendulum, periodic motion, period vs
+      length
+    - "free_fall": an object falling straight down, gravity,
+      terminal velocity
+    - "spring": a mass on a spring, simple harmonic motion,
+      oscillation, Hooke's law
+    - "wave": wave motion, frequency, amplitude, wavelength
+    - "circuit_ohm": a simple circuit, Ohm's law, voltage/
+      resistance/current
+    Only use "simulation" for Physics content that genuinely
+    matches one of these six specific scenarios - for anything
+    else physics-related, prefer "equation", "graph", or
+    "process" instead.
 
 EXAMPLES (follow this pattern):
 
@@ -132,7 +157,7 @@ Correct answer: {{"subject": "Mathematics", "visual_type": "graph", "title": "y 
 Section: "The Pericardium - The heart is wrapped in a protective
 sac called the pericardium, which has a fibrous outer layer and
 a serous inner layer with two sub-layers (parietal and visceral)."
-Correct answer: {{"subject": "Biology", "visual_type": "image", "title": "Layers of the Pericardium", "equation": "", "graph_expression": "", "steps": [], "process_steps": [], "code": "", "expected_output": "", "image_query": "pericardium layers labeled diagram heart", "map_query": ""}}
+Correct answer: {{"subject": "Biology", "visual_type": "image", "title": "Layers of the Pericardium", "equation": "", "graph_expression": "", "steps": [], "process_steps": [], "code": "", "expected_output": "", "image_query": "pericardium heart", "map_query": ""}}
 
 Section: "Ohm's Law - If resistance increases while voltage stays
 constant, current decreases, since I = V/R."
@@ -145,7 +170,13 @@ Correct answer: {{"subject": "History", "visual_type": "map", "title": "Roman Em
 Section: "In a typical web app, the frontend sends a request to
 the backend API, which queries the database and returns the
 result to the frontend."
-Correct answer: {{"subject": "Programming", "visual_type": "process", "title": "Web App Architecture", "equation": "", "graph_expression": "", "steps": [], "process_steps": ["Frontend", "Backend API", "Database"], "code": "", "expected_output": "", "image_query": "", "map_query": ""}}
+Correct answer: {{"subject": "Programming", "visual_type": "process", "title": "Web App Architecture", "equation": "", "graph_expression": "", "steps": [], "process_steps": ["Frontend", "Backend API", "Database"], "code": "", "expected_output": "", "image_query": "", "map_query": "", "simulation_type": "none"}}
+
+Section: "Projectile Motion - When a ball is launched at an angle
+with some initial speed, gravity pulls it back down, tracing a
+curved path called a trajectory. The launch angle and speed
+together determine how far it travels."
+Correct answer: {{"subject": "Physics", "visual_type": "simulation", "title": "Projectile Motion", "equation": "", "graph_expression": "", "steps": [], "process_steps": [], "code": "", "expected_output": "", "image_query": "", "map_query": "", "simulation_type": "projectile"}}
 """
 
 
@@ -167,7 +198,8 @@ def _normalize_visual_spec(raw_spec):
         "code": "",
         "expected_output": "",
         "image_query": "",
-        "map_query": ""
+        "map_query": "",
+        "simulation_type": "none"
     }
 
     if not isinstance(raw_spec, dict):
@@ -199,6 +231,9 @@ def _normalize_visual_spec(raw_spec):
 
     if spec["visual_type"] not in VALID_VISUAL_TYPES:
         spec["visual_type"] = "none"
+
+    if spec["simulation_type"] not in VALID_SIMULATION_TYPES:
+        spec["simulation_type"] = "none"
 
     return spec
 
@@ -242,6 +277,55 @@ CODE_PATTERN = re.compile(
     r"(def |class \w|import |print\(|for\s*\(|function |"
     r"#include|public static|=\s*\d+\s*;)"
 )
+
+# Physics content that is genuinely a moving/oscillating/dynamic
+# scenario - matched against a specific simulation_type so the
+# heuristic net can catch cases the AI classified as a generic
+# "process" instead of the interactive demo that would teach it
+# better.
+SIMULATION_KEYWORDS = {
+    "projectile": (
+        "projectile", "launched at an angle", "trajectory",
+        "range of a projectile", "thrown at an angle"
+    ),
+    "pendulum": (
+        "pendulum", "swinging", "period of oscillation",
+        "simple pendulum"
+    ),
+    "free_fall": (
+        "free fall", "free-fall", "falling object",
+        "terminal velocity", "dropped from"
+    ),
+    "spring": (
+        "spring", "simple harmonic motion", "shm", "hooke's law",
+        "hookes law", "oscillates", "oscillation"
+    ),
+    "wave": (
+        "wave motion", "wavelength", "amplitude and frequency",
+        "transverse wave", "longitudinal wave"
+    ),
+    "circuit_ohm": (
+        "ohm's law", "ohms law", "electric circuit", "resistor",
+        "voltage and current", "v = ir", "v=ir"
+    )
+}
+
+
+def _detect_simulation_type(text):
+    """
+    Returns a simulation_type key if `text` clearly matches one of
+    the supported physics simulations, else "none". Heuristic only
+    - used to correct the AI's category, never to invent content.
+    """
+
+    lowered = (text or "").lower()
+
+    for simulation_type, keywords in SIMULATION_KEYWORDS.items():
+
+        if any(keyword in lowered for keyword in keywords):
+            return simulation_type
+
+    return "none"
 
 
 def _has_plottable_equation(text):
@@ -473,6 +557,26 @@ def _apply_heuristic_overrides(spec, section_content):
             spec["map_query"] = (
                 f"{spec.get('title') or 'historical'} map"
             )
+
+    # ----------------------------------------------------------
+    # Physics content that clearly matches one of the supported
+    # interactive simulations, but the AI picked "process" (or
+    # "equation") instead of the more engaging "simulation".
+    # ----------------------------------------------------------
+
+    if (
+        subject == "Physics"
+        and spec.get("visual_type") in ("process", "equation")
+    ):
+
+        detected_simulation_type = _detect_simulation_type(
+            section_content
+        )
+
+        if detected_simulation_type != "none":
+
+            spec["visual_type"] = "simulation"
+            spec["simulation_type"] = detected_simulation_type
 
     return spec
 
@@ -792,17 +896,49 @@ def render_code(spec):
 
 
 # ============================================================
-# RENDER: IMAGE (free, keyless Wikimedia Commons search)
+# RENDER: IMAGE (free, keyless - multi-strategy search)
+#
+# A single long, descriptive query (e.g. "pericardium layers
+# labeled diagram heart fibrous serous parietal visceral") often
+# returns NOTHING from Wikimedia Commons's search, because it
+# treats every word as required - the more words, the narrower
+# (often to zero) the results. This tries progressively shorter/
+# broader queries, then falls back to Wikipedia's own lead image
+# (very reliable for standard topics), then Openverse (a broad
+# CC-image search engine) - all free, no API key required.
 # ============================================================
 
+def _shorten_query(query, word_count):
+    """
+    Keep only the first `word_count` significant words of a
+    query - used to progressively broaden a search that returned
+    nothing for the full, longer phrase.
+    """
+
+    stopwords = {
+        "the", "a", "an", "of", "and", "or", "in", "on", "for",
+        "with", "diagram", "labeled", "label", "labelled",
+        "showing", "image", "picture", "illustration"
+    }
+
+    words = [
+        word
+        for word in query.split()
+        if word.lower() not in stopwords
+    ]
+
+    if not words:
+        words = query.split()
+
+    return " ".join(words[:word_count]).strip()
+
+
 @st.cache_data(show_spinner=False, ttl=3600)
-def _search_wikimedia_image(query):
+def _search_wikimedia_commons(query):
     """
     Search Wikimedia Commons for a freely-licensed image matching
     `query`. Returns an image URL, or None if nothing suitable
-    was found (or the request failed) - no API key required.
-    Cached for an hour so the same query doesn't hit the network
-    again on every rerun.
+    was found (or the request failed).
     """
 
     try:
@@ -845,9 +981,150 @@ def _search_wikimedia_image(query):
 
     except Exception as error:
 
-        print(f"Wikimedia image lookup failed: {error}")
+        print(f"Wikimedia Commons lookup failed for '{query}': {error}")
 
     return None
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _search_wikipedia_lead_image(query):
+    """
+    Fallback: search Wikipedia (not Commons) for a matching
+    article and return ITS lead image. Wikipedia has far better
+    coverage than Commons search for standard educational topics
+    (anatomy, historical figures, well-known diagrams), since
+    every article's infobox image is indexed here even when
+    Commons's own search engine can't surface it.
+    """
+
+    try:
+
+        response = requests.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={
+                "action": "query",
+                "format": "json",
+                "generator": "search",
+                "gsrsearch": query,
+                "gsrlimit": 1,
+                "prop": "pageimages",
+                "piprop": "thumbnail",
+                "pithumbsize": 600
+            },
+            headers={
+                "User-Agent": "EduSense-AI/1.0 (student project)"
+            },
+            timeout=6
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        pages = data.get("query", {}).get("pages", {})
+
+        for page in pages.values():
+
+            thumbnail = page.get("thumbnail")
+
+            if thumbnail and thumbnail.get("source"):
+                return thumbnail["source"]
+
+    except Exception as error:
+
+        print(f"Wikipedia lead-image lookup failed for '{query}': {error}")
+
+    return None
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _search_openverse(query):
+    """
+    Last-resort fallback: Openverse (openverse.org), a free,
+    keyless search engine that aggregates hundreds of millions
+    of openly-licensed images (including Wikimedia, museums,
+    Flickr Commons, etc.) - broader coverage than Commons alone.
+    """
+
+    try:
+
+        response = requests.get(
+            "https://api.openverse.org/v1/images/",
+            params={
+                "q": query,
+                "page_size": 1,
+                "license_type": "commercial,modification"
+            },
+            headers={
+                "User-Agent": "EduSense-AI/1.0 (student project)"
+            },
+            timeout=6
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        results = data.get("results", [])
+
+        if results:
+
+            return (
+                results[0].get("thumbnail")
+                or results[0].get("url")
+            )
+
+    except Exception as error:
+
+        print(f"Openverse lookup failed for '{query}': {error}")
+
+    return None
+
+
+def _search_image_multi_strategy(query):
+    """
+    Try, in order: Commons (full query) -> Commons (shortened to
+    4 words) -> Commons (shortened to 2 words) -> Wikipedia lead
+    image (full query) -> Wikipedia lead image (2 words) ->
+    Openverse (full query). Returns the first hit, or None if
+    every strategy comes up empty.
+    """
+
+    if not query:
+        return None
+
+    candidates = [
+        query,
+        _shorten_query(query, 4),
+        _shorten_query(query, 2)
+    ]
+
+    # De-duplicate while preserving order (short queries may
+    # collapse to the same string as a longer one).
+    seen = set()
+    unique_candidates = []
+
+    for candidate in candidates:
+
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            unique_candidates.append(candidate)
+
+    for candidate in unique_candidates:
+
+        image_url = _search_wikimedia_commons(candidate)
+
+        if image_url:
+            return image_url
+
+    for candidate in unique_candidates:
+
+        image_url = _search_wikipedia_lead_image(candidate)
+
+        if image_url:
+            return image_url
+
+    return _search_openverse(query)
 
 
 def render_image(spec):
@@ -860,7 +1137,7 @@ def render_image(spec):
     if spec.get("title"):
         st.markdown(f"**{spec['title']}**")
 
-    image_url = _search_wikimedia_image(query)
+    image_url = _search_image_multi_strategy(query)
 
     if image_url:
 
@@ -898,7 +1175,7 @@ def render_map(spec):
     if spec.get("title"):
         st.markdown(f"**{spec['title']}**")
 
-    map_url = _search_wikimedia_image(query)
+    map_url = _search_image_multi_strategy(query)
 
     if map_url:
 
@@ -916,6 +1193,437 @@ def render_map(spec):
 
 
 # ============================================================
+# RENDER: PHYSICS SIMULATION (pure HTML5 Canvas + vanilla JS -
+# zero cost, no API key, no external service - runs entirely in
+# the student's browser via components.html, the same mechanism
+# already used for Mermaid diagrams above.)
+# ============================================================
+
+_SIMULATION_BASE_STYLE = """
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    margin: 0;
+    padding: 8px;
+    color: #222;
+  }
+  canvas {
+    background: #f4f6fb;
+    border: 1px solid #d8dee9;
+    border-radius: 8px;
+    display: block;
+    margin: 8px 0;
+    width: 100%;
+    max-width: 640px;
+  }
+  .sim-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    align-items: center;
+    font-size: 14px;
+  }
+  .sim-controls label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 160px;
+  }
+  .sim-readout {
+    margin-top: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #2b3a67;
+  }
+  input[type=range] { width: 100%; }
+</style>
+"""
+
+
+def _simulation_projectile_html():
+
+    return _SIMULATION_BASE_STYLE + """
+<canvas id="c" width="640" height="320"></canvas>
+<div class="sim-controls">
+  <label>Launch speed: <span id="vOut">30</span> m/s
+    <input id="v" type="range" min="10" max="60" value="30"></label>
+  <label>Launch angle: <span id="aOut">45</span>&deg;
+    <input id="a" type="range" min="10" max="80" value="45"></label>
+  <button id="fire">Launch</button>
+</div>
+<div class="sim-readout" id="readout">Range: -- m &nbsp; Max height: -- m</div>
+<script>
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+const vSlider = document.getElementById('v');
+const aSlider = document.getElementById('a');
+const vOut = document.getElementById('vOut');
+const aOut = document.getElementById('aOut');
+const readout = document.getElementById('readout');
+const g = 9.8;
+const scale = 5.5;
+let animId = null;
+
+function drawGround() {
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.strokeStyle = '#8892a6';
+  ctx.beginPath();
+  ctx.moveTo(0, c.height - 20);
+  ctx.lineTo(c.width, c.height - 20);
+  ctx.stroke();
+}
+
+function run() {
+  if (animId) cancelAnimationFrame(animId);
+  const v0 = parseFloat(vSlider.value);
+  const angle = parseFloat(aSlider.value) * Math.PI / 180;
+  const vx = v0 * Math.cos(angle);
+  const vy0 = v0 * Math.sin(angle);
+  const range = (v0 * v0 * Math.sin(2 * angle)) / g;
+  const maxH = (vy0 * vy0) / (2 * g);
+  readout.textContent = 'Range: ' + range.toFixed(1) + ' m   Max height: ' + maxH.toFixed(1) + ' m';
+  let t = 0;
+  function frame() {
+    drawGround();
+    t += 0.05;
+    const x = vx * t;
+    const y = vy0 * t - 0.5 * g * t * t;
+    if (y < 0) { animId = null; return; }
+    ctx.fillStyle = '#4C6FFF';
+    ctx.beginPath();
+    ctx.arc(20 + x * scale, c.height - 20 - y * scale, 8, 0, Math.PI * 2);
+    ctx.fill();
+    animId = requestAnimationFrame(frame);
+  }
+  frame();
+}
+
+vSlider.oninput = () => { vOut.textContent = vSlider.value; };
+aSlider.oninput = () => { aOut.textContent = aSlider.value; };
+document.getElementById('fire').onclick = run;
+drawGround();
+run();
+</script>
+"""
+
+
+def _simulation_pendulum_html():
+
+    return _SIMULATION_BASE_STYLE + """
+<canvas id="c" width="640" height="320"></canvas>
+<div class="sim-controls">
+  <label>Length: <span id="lOut">1.5</span> m
+    <input id="l" type="range" min="0.5" max="3" step="0.1" value="1.5"></label>
+  <label>Gravity: <span id="gOut">9.8</span> m/s&sup2;
+    <input id="g" type="range" min="1.6" max="24.8" step="0.1" value="9.8"></label>
+</div>
+<div class="sim-readout" id="readout">Period T = -- s</div>
+<script>
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+const lSlider = document.getElementById('l');
+const gSlider = document.getElementById('g');
+const lOut = document.getElementById('lOut');
+const gOut = document.getElementById('gOut');
+const readout = document.getElementById('readout');
+const pivotX = c.width / 2, pivotY = 40, pxScale = 80;
+let theta0 = 0.6, t = 0;
+
+function period() {
+  const L = parseFloat(lSlider.value);
+  const g = parseFloat(gSlider.value);
+  return 2 * Math.PI * Math.sqrt(L / g);
+}
+
+function frame() {
+  const L = parseFloat(lSlider.value);
+  const g = parseFloat(gSlider.value);
+  const T = period();
+  readout.textContent = 'Period T = 2\u03c0\u221a(L/g) = ' + T.toFixed(2) + ' s';
+  const omega = 2 * Math.PI / T;
+  const theta = theta0 * Math.cos(omega * t);
+  const bobX = pivotX + L * pxScale * Math.sin(theta);
+  const bobY = pivotY + L * pxScale * Math.cos(theta);
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.strokeStyle = '#8892a6';
+  ctx.beginPath();
+  ctx.moveTo(pivotX, pivotY);
+  ctx.lineTo(bobX, bobY);
+  ctx.stroke();
+  ctx.fillStyle = '#2b3a67';
+  ctx.beginPath();
+  ctx.arc(pivotX, pivotY, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#e0623d';
+  ctx.beginPath();
+  ctx.arc(bobX, bobY, 14, 0, Math.PI * 2);
+  ctx.fill();
+  t += 0.03;
+  requestAnimationFrame(frame);
+}
+
+lSlider.oninput = () => { lOut.textContent = lSlider.value; };
+gSlider.oninput = () => { gOut.textContent = gSlider.value; };
+frame();
+</script>
+"""
+
+
+def _simulation_free_fall_html():
+
+    return _SIMULATION_BASE_STYLE + """
+<canvas id="c" width="640" height="320"></canvas>
+<div class="sim-controls">
+  <label>Drop height: <span id="hOut">45</span> m
+    <input id="h" type="range" min="5" max="100" value="45"></label>
+  <label><input id="air" type="checkbox"> Include air resistance</label>
+  <button id="drop">Drop</button>
+</div>
+<div class="sim-readout" id="readout">Velocity: -- m/s</div>
+<script>
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+const hSlider = document.getElementById('h');
+const hOut = document.getElementById('hOut');
+const airBox = document.getElementById('air');
+const readout = document.getElementById('readout');
+const g = 9.8;
+let animId = null;
+
+function drawGround() {
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.strokeStyle = '#8892a6';
+  ctx.beginPath();
+  ctx.moveTo(0, c.height - 20);
+  ctx.lineTo(c.width, c.height - 20);
+  ctx.stroke();
+}
+
+function run() {
+  if (animId) cancelAnimationFrame(animId);
+  const H = parseFloat(hSlider.value);
+  const scale = (c.height - 40) / H;
+  const drag = airBox.checked;
+  const terminalV = 50;
+  let v = 0, y = H, t = 0;
+  function frame() {
+    drawGround();
+    const dt = 0.03;
+    let a = g;
+    if (drag) { a = g * (1 - (v * v) / (terminalV * terminalV)); }
+    v += a * dt;
+    y -= v * dt;
+    t += dt;
+    if (y < 0) { y = 0; animId = null; }
+    readout.textContent = 'Velocity: ' + v.toFixed(1) + ' m/s   Time: ' + t.toFixed(1) + ' s' + (drag ? ' (with air resistance)' : '');
+    ctx.fillStyle = '#4C6FFF';
+    ctx.beginPath();
+    ctx.arc(c.width / 2, 20 + (H - y) * scale, 10, 0, Math.PI * 2);
+    ctx.fill();
+    if (y > 0) animId = requestAnimationFrame(frame);
+  }
+  frame();
+}
+
+hSlider.oninput = () => { hOut.textContent = hSlider.value; };
+document.getElementById('drop').onclick = run;
+drawGround();
+run();
+</script>
+"""
+
+
+def _simulation_spring_html():
+
+    return _SIMULATION_BASE_STYLE + """
+<canvas id="c" width="640" height="260"></canvas>
+<div class="sim-controls">
+  <label>Spring constant k: <span id="kOut">20</span> N/m
+    <input id="k" type="range" min="5" max="60" value="20"></label>
+  <label>Mass: <span id="mOut">1.0</span> kg
+    <input id="m" type="range" min="0.2" max="5" step="0.1" value="1.0"></label>
+</div>
+<div class="sim-readout" id="readout">Angular frequency &omega; = -- rad/s</div>
+<script>
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+const kSlider = document.getElementById('k');
+const mSlider = document.getElementById('m');
+const kOut = document.getElementById('kOut');
+const mOut = document.getElementById('mOut');
+const readout = document.getElementById('readout');
+const centerX = c.width / 2, topY = 20, amp = 70;
+let t = 0;
+
+function frame() {
+  const k = parseFloat(kSlider.value);
+  const m = parseFloat(mSlider.value);
+  const omega = Math.sqrt(k / m);
+  readout.textContent = 'Angular frequency \u03c9 = \u221a(k/m) = ' + omega.toFixed(2) + ' rad/s';
+  const x = amp * Math.cos(omega * t);
+  const massY = topY + 120 + x;
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.strokeStyle = '#8892a6';
+  ctx.beginPath();
+  const coils = 10;
+  for (let i = 0; i <= coils; i++) {
+    const yy = topY + (i / coils) * (massY - topY);
+    const xx = centerX + (i % 2 === 0 ? -12 : 12);
+    ctx.lineTo(xx, yy);
+  }
+  ctx.stroke();
+  ctx.fillStyle = '#e0623d';
+  ctx.fillRect(centerX - 25, massY, 50, 40);
+  t += 0.03;
+  requestAnimationFrame(frame);
+}
+
+kSlider.oninput = () => { kOut.textContent = kSlider.value; };
+mSlider.oninput = () => { mOut.textContent = mSlider.value; };
+frame();
+</script>
+"""
+
+
+def _simulation_wave_html():
+
+    return _SIMULATION_BASE_STYLE + """
+<canvas id="c" width="640" height="220"></canvas>
+<div class="sim-controls">
+  <label>Frequency: <span id="fOut">1.0</span> Hz
+    <input id="f" type="range" min="0.2" max="4" step="0.1" value="1.0"></label>
+  <label>Amplitude: <span id="ampOut">60</span> px
+    <input id="amp" type="range" min="10" max="90" value="60"></label>
+</div>
+<div class="sim-readout">A traveling wave: amplitude and frequency change how tall and how fast it ripples.</div>
+<script>
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+const fSlider = document.getElementById('f');
+const ampSlider = document.getElementById('amp');
+const fOut = document.getElementById('fOut');
+const ampOut = document.getElementById('ampOut');
+let t = 0;
+
+function frame() {
+  const freq = parseFloat(fSlider.value);
+  const amp = parseFloat(ampSlider.value);
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.strokeStyle = '#4C6FFF';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let x = 0; x < c.width; x++) {
+    const y = c.height / 2 + amp * Math.sin((x / 40) - t * freq * 2);
+    if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.strokeStyle = '#c9cfdc';
+  ctx.beginPath();
+  ctx.moveTo(0, c.height / 2);
+  ctx.lineTo(c.width, c.height / 2);
+  ctx.stroke();
+  t += 0.05;
+  requestAnimationFrame(frame);
+}
+
+fSlider.oninput = () => { fOut.textContent = fSlider.value; };
+ampSlider.oninput = () => { ampOut.textContent = ampSlider.value; };
+frame();
+</script>
+"""
+
+
+def _simulation_circuit_ohm_html():
+
+    return _SIMULATION_BASE_STYLE + """
+<canvas id="c" width="640" height="240"></canvas>
+<div class="sim-controls">
+  <label>Voltage (V): <span id="vOut">9</span> V
+    <input id="v" type="range" min="1" max="24" value="9"></label>
+  <label>Resistance (R): <span id="rOut">3</span> &Omega;
+    <input id="r" type="range" min="1" max="24" value="3"></label>
+</div>
+<div class="sim-readout" id="readout">Current I = V / R = -- A</div>
+<script>
+const c = document.getElementById('c');
+const ctx = c.getContext('2d');
+const vSlider = document.getElementById('v');
+const rSlider = document.getElementById('r');
+const vOut = document.getElementById('vOut');
+const rOut = document.getElementById('rOut');
+const readout = document.getElementById('readout');
+let glowPhase = 0;
+
+function draw() {
+  const V = parseFloat(vSlider.value);
+  const R = parseFloat(rSlider.value);
+  const I = V / R;
+  readout.textContent = 'Current I = V / R = ' + I.toFixed(2) + ' A   (Power = ' + (V * I).toFixed(1) + ' W)';
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.strokeStyle = '#2b3a67';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(80, 60, 480, 120);
+  const brightness = Math.min(1, I / 8);
+  glowPhase += 0.1;
+  const flicker = 0.9 + 0.1 * Math.sin(glowPhase);
+  ctx.beginPath();
+  ctx.arc(320, 60, 22, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255, 200, 40,' + (brightness * flicker).toFixed(2) + ')';
+  ctx.fill();
+  ctx.strokeStyle = '#8892a6';
+  ctx.stroke();
+  ctx.fillStyle = '#222';
+  ctx.font = '13px sans-serif';
+  ctx.fillText('Battery (' + V + 'V)', 60, 200);
+  ctx.fillText('Resistor (' + R + '\u03a9)', 500, 200);
+  ctx.fillText('Bulb', 300, 100);
+  requestAnimationFrame(draw);
+}
+
+vSlider.oninput = () => { vOut.textContent = vSlider.value; };
+rSlider.oninput = () => { rOut.textContent = rSlider.value; };
+draw();
+</script>
+"""
+
+
+_SIMULATION_BUILDERS = {
+    "projectile": _simulation_projectile_html,
+    "pendulum": _simulation_pendulum_html,
+    "free_fall": _simulation_free_fall_html,
+    "spring": _simulation_spring_html,
+    "wave": _simulation_wave_html,
+    "circuit_ohm": _simulation_circuit_ohm_html
+}
+
+
+def render_simulation(spec):
+    """
+    Render an interactive, zero-cost physics simulation (pure
+    HTML5 canvas + vanilla JS, no API key, no paid service) for
+    one of the supported simulation_type values. Falls back to
+    render_process() if simulation_type is missing/unsupported,
+    so the section still shows something useful.
+    """
+
+    simulation_type = spec.get("simulation_type", "none")
+
+    builder = _SIMULATION_BUILDERS.get(simulation_type)
+
+    if not builder:
+        render_process(spec)
+        return
+
+    if spec.get("title"):
+        st.markdown(f"**{spec['title']}**")
+
+    st.caption("🧪 Interactive - drag the sliders to explore")
+
+    components.html(builder(), height=440, scrolling=True)
+
+
+# ============================================================
 # MAIN DISPATCH
 # ============================================================
 
@@ -926,7 +1634,8 @@ RENDERERS = {
     "timeline": render_timeline,
     "code": render_code,
     "image": render_image,
-    "map": render_map
+    "map": render_map,
+    "simulation": render_simulation
 }
 
 

@@ -60,7 +60,8 @@ from modules.teaching_engine import (
     move_to_previous_day,
     save_day_answer,
     mark_day_completed,
-    is_weekly_complete
+    is_weekly_complete,
+    record_misconception
 )
 
 from modules.audio_teacher import (
@@ -133,6 +134,11 @@ defaults = {
     "answer_evaluation": None,
 
     "student_answer": "",
+
+    # Misconception-targeted re-teaching for the single-lesson
+    # AI Teacher - cached per section index so it's only
+    # generated once per wrong answer, not on every rerun.
+    "section_remediation": {},
 
     "final_quiz_answers": {},
 
@@ -1231,6 +1237,16 @@ if st.session_state.cleaned_text:
                 f"## 📅 Day {day_number} — {day_title}"
             )
 
+            # ----------------------------------------------------
+            # Defined unconditionally (not just inside the
+            # "generate lesson" branch below) because it's read
+            # later every time this day is rendered — including
+            # on reruns where the explanation is already cached
+            # and that branch is skipped entirely.
+            # ----------------------------------------------------
+
+            day_visual_key = f"day_visual_{day_number}"
+
             focus = current_day.get(
                 "focus",
                 ""
@@ -1321,11 +1337,44 @@ if st.session_state.cleaned_text:
                             "key_points": key_points
                         }
 
+                        # ------------------------------------------
+                        # Detect the visual BEFORE generating the
+                        # explanation (not after) so the explanation
+                        # - which is also the text fed to
+                        # text-to-speech - can be written to
+                        # actually narrate that visual out loud.
+                        # ------------------------------------------
+
+                        try:
+
+                            day_visual_spec_for_narration = (
+                                detect_visual(
+                                    day_title,
+                                    adaptive_description
+                                    + "\n"
+                                    + "\n".join(key_points)
+                                )
+                            )
+
+                        except Exception as visual_error:
+
+                            print(
+                                "Day visual detection failed: "
+                                f"{visual_error}"
+                            )
+
+                            day_visual_spec_for_narration = None
+
+                        st.session_state.visual_cache[
+                            day_visual_key
+                        ] = day_visual_spec_for_narration
+
                         explanation = generate_teacher_explanation(
                             day_section,
                             st.session_state.cleaned_text,
                             st.session_state.student_level,
-                            st.session_state.preferred_language
+                            st.session_state.preferred_language,
+                            visual_spec=day_visual_spec_for_narration
                         )
 
                         st.session_state.weekly_day_explanations[
@@ -1348,6 +1397,40 @@ if st.session_state.cleaned_text:
                     ""
                 )
             )
+
+            # ----------------------------------------------------
+            # 🎨 Subject-Aware Visual for this day - rendered HERE,
+            # right when the day opens, rather than after the
+            # lesson text and audio (moved earlier so it's seen
+            # right when it's relevant). Already detected above
+            # (before the explanation was generated) and cached
+            # under day_visual_key, so this just re-renders it.
+            # ----------------------------------------------------
+
+            cached_day_visual_spec = (
+                st.session_state.visual_cache.get(
+                    day_visual_key
+                )
+            )
+
+            if (
+                cached_day_visual_spec
+                and cached_day_visual_spec.get(
+                    "visual_type",
+                    "none"
+                ) != "none"
+            ):
+
+                with st.expander(
+                    "🎨 Visual: "
+                    + (
+                        cached_day_visual_spec.get("title")
+                        or cached_day_visual_spec.get("subject")
+                    ),
+                    expanded=True
+                ):
+
+                    render_visual(cached_day_visual_spec)
 
             if day_explanation:
 
@@ -1428,59 +1511,12 @@ if st.session_state.cleaned_text:
                     )
 
             # ----------------------------------------------------
-            # 🎨 Subject-Aware Visual for this day (same detector
-            # as the single-lesson AI Teacher)
+            # 🔊 AI Teaching Voice ends here; the visual itself
+            # now renders EARLIER (right after the lesson text is
+            # ready, before this audio block) so it doesn't sit at
+            # the very bottom of the day - see the "🎨 Subject-
+            # Aware Visual for this day" block above.
             # ----------------------------------------------------
-
-            if day_cache_key not in st.session_state.visual_cache:
-
-                with st.spinner(
-                    "🎨 Preparing a visual..."
-                ):
-
-                    try:
-
-                        day_visual_spec = detect_visual(
-                            day_title,
-                            day_speech_text
-                        )
-
-                    except Exception as visual_error:
-
-                        print(
-                            f"Visual detection failed: {visual_error}"
-                        )
-
-                        day_visual_spec = None
-
-                    st.session_state.visual_cache[
-                        day_cache_key
-                    ] = day_visual_spec
-
-            cached_day_visual_spec = (
-                st.session_state.visual_cache.get(
-                    day_cache_key
-                )
-            )
-
-            if (
-                cached_day_visual_spec
-                and cached_day_visual_spec.get(
-                    "visual_type",
-                    "none"
-                ) != "none"
-            ):
-
-                with st.expander(
-                    "🎨 Visual: "
-                    + (
-                        cached_day_visual_spec.get("title")
-                        or cached_day_visual_spec.get("subject")
-                    ),
-                    expanded=True
-                ):
-
-                    render_visual(cached_day_visual_spec)
 
             day_already_done = (
                 day_number in completed_days
@@ -1643,22 +1679,66 @@ if st.session_state.cleaned_text:
                             )
                         else:
                             weak_concept = str(expected_concept).strip()
+
+                            # -------------------------------------
+                            # 🧠 Misconception detection - the AI
+                            # evaluator now names the SPECIFIC
+                            # wrong idea behind the answer (not
+                            # just "incorrect"). Record it, and if
+                            # one was found, have the re-teach
+                            # explanation correct THAT idea
+                            # directly instead of a generic recap
+                            # of the weak concept.
+                            # -------------------------------------
+
+                            misconception = evaluation.get(
+                                "misconception", ""
+                            )
+
+                            record_misconception(
+                                weekly_state,
+                                weak_concept,
+                                misconception
+                            )
+
                             if weak_concept:
                                 weekly_state.setdefault("weak_concepts_by_day", {})
                                 weekly_state["weak_concepts_by_day"][str(day_number)] = [
                                     weak_concept
                                 ]
 
-                                remediation_section = {
-                                    "title": f"Re-teaching: {weak_concept}",
-                                    "description": (
+                                if misconception:
+                                    remediation_description = (
+                                        "The student answered this practice "
+                                        "question with a specific misconception. "
+                                        "Directly correct this misconception - "
+                                        "name what they seem to believe, explain "
+                                        "clearly why it's not quite right, and "
+                                        "give the correct understanding with a "
+                                        "simple example.\n\n"
+                                        f"Question: {question_text}\n"
+                                        f"Student answer: {student_answer}\n"
+                                        f"Misconception to correct: {misconception}"
+                                    )
+                                    remediation_key_points = [
+                                        f"Misconception: {misconception}"
+                                    ]
+                                else:
+                                    remediation_description = (
                                         "The student answered this practice question incorrectly. "
                                         "Re-teach the weak concept clearly and simply.\n\n"
                                         f"Question: {question_text}\n"
                                         f"Student answer: {student_answer}\n"
                                         f"Teacher feedback: {evaluation.get('feedback', '')}"
-                                    ),
-                                    "key_points": [f"Weak concept: {weak_concept}"]
+                                    )
+                                    remediation_key_points = [
+                                        f"Weak concept: {weak_concept}"
+                                    ]
+
+                                remediation_section = {
+                                    "title": f"Re-teaching: {weak_concept}",
+                                    "description": remediation_description,
+                                    "key_points": remediation_key_points
                                 }
 
                                 try:
@@ -2253,6 +2333,101 @@ if st.session_state.cleaned_text:
 
 
                 # ------------------------------------------------
+                # 🎨 Detect the visual FIRST (before the
+                # explanation) so the explanation - which is also
+                # the exact text fed to text-to-speech below - can
+                # be written to actually narrate that visual out
+                # loud instead of ignoring it. Keyed by section
+                # index/title, not by the explanation text, since
+                # the explanation doesn't exist yet at this point.
+                # ------------------------------------------------
+
+                section_visual_key = (
+                    f"section_visual_{current_index}_"
+                    f"{current_section.get('title', '')}"
+                )
+
+                if (
+                    section_visual_key
+                    not in st.session_state.visual_cache
+                ):
+
+                    with st.spinner(
+                        "🎨 Preparing a visual..."
+                    ):
+
+                        try:
+
+                            section_visual_spec = detect_visual(
+                                current_section.get("title", ""),
+                                current_section.get("description", "")
+                                + "\n"
+                                + "\n".join(
+                                    current_section.get(
+                                        "key_points", []
+                                    )
+                                )
+                            )
+
+                        except Exception as visual_error:
+
+                            print(
+                                "Section visual detection failed: "
+                                f"{visual_error}"
+                            )
+
+                            section_visual_spec = None
+
+                        st.session_state.visual_cache[
+                            section_visual_key
+                        ] = section_visual_spec
+
+                cached_section_visual_spec = (
+                    st.session_state.visual_cache.get(
+                        section_visual_key
+                    )
+                )
+
+                # ------------------------------------------------
+                # 🎨 Subject-Aware Visual - rendered HERE, as soon
+                # as the section opens, rather than after the
+                # explanation and audio (moved earlier so the
+                # student sees it right when it's relevant, not
+                # buried at the end of the section).
+                #
+                # AI classifies this section (Mathematics /
+                # Physics / Biology / History / Programming /
+                # Chemistry / General) and picks a matching visual
+                # - equation, graph, process diagram, timeline,
+                # code, a physics simulation, or a relevant image.
+                # ------------------------------------------------
+
+                if (
+                    cached_section_visual_spec
+                    and cached_section_visual_spec.get(
+                        "visual_type",
+                        "none"
+                    ) != "none"
+                ):
+
+                    with st.expander(
+                        "🎨 Visual: "
+                        + (
+                            cached_section_visual_spec.get(
+                                "title"
+                            )
+                            or cached_section_visual_spec.get(
+                                "subject"
+                            )
+                        ),
+                        expanded=True
+                    ):
+
+                        render_visual(
+                            cached_section_visual_spec
+                        )
+
+                # ------------------------------------------------
                 # Generate explanation
                 # ------------------------------------------------
 
@@ -2269,7 +2444,8 @@ if st.session_state.cleaned_text:
                                     current_section,
                                     st.session_state.cleaned_text,
                                     st.session_state.student_level,
-                                    st.session_state.preferred_language
+                                    st.session_state.preferred_language,
+                                    visual_spec=cached_section_visual_spec
                                 )
                             )
 
@@ -2374,76 +2550,14 @@ if st.session_state.cleaned_text:
                             )
 
                     # --------------------------------------------
-                    # 🎨 Subject-Aware Visual
-                    #
-                    # AI classifies this section (Mathematics /
-                    # Physics / Biology / History / Programming /
-                    # Chemistry / General) and picks a matching
-                    # visual - equation, graph, process diagram,
-                    # timeline, code, or a relevant image. Cached
-                    # per section so it's only detected once, not
-                    # re-asked of the AI on every rerun.
+                    # 🔊 AI Teaching Voice ends here; the visual
+                    # itself now renders EARLIER (right after
+                    # detection, before the explanation/audio) so
+                    # the student sees it as soon as they open the
+                    # section instead of scrolling past everything
+                    # else first - see the "🎨 Subject-Aware
+                    # Visual" block above.
                     # --------------------------------------------
-
-                    if (
-                        explanation_cache_key
-                        not in st.session_state.visual_cache
-                    ):
-
-                        with st.spinner(
-                            "🎨 Preparing a visual..."
-                        ):
-
-                            try:
-
-                                visual_spec = detect_visual(
-                                    current_section.get(
-                                        "title",
-                                        ""
-                                    ),
-                                    st.session_state
-                                    .teacher_explanation
-                                )
-
-                            except Exception as visual_error:
-
-                                print(
-                                    "Visual detection failed: "
-                                    f"{visual_error}"
-                                )
-
-                                visual_spec = None
-
-                            st.session_state.visual_cache[
-                                explanation_cache_key
-                            ] = visual_spec
-
-                    cached_visual_spec = (
-                        st.session_state.visual_cache.get(
-                            explanation_cache_key
-                        )
-                    )
-
-                    if (
-                        cached_visual_spec
-                        and cached_visual_spec.get(
-                            "visual_type",
-                            "none"
-                        ) != "none"
-                    ):
-
-                        with st.expander(
-                            "🎨 Visual: "
-                            + (
-                                cached_visual_spec.get("title")
-                                or cached_visual_spec.get(
-                                    "subject"
-                                )
-                            ),
-                            expanded=True
-                        ):
-
-                            render_visual(cached_visual_spec)
 
 
                 # ------------------------------------------------
@@ -2573,6 +2687,103 @@ if st.session_state.cleaned_text:
                                 current_index
                             )
 
+                            # A correct retry clears any earlier
+                            # re-teaching card for this section so
+                            # it doesn't linger once resolved.
+                            st.session_state.section_remediation.pop(
+                                current_index,
+                                None
+                            )
+
+                        else:
+
+                            # ------------------------------------
+                            # 🧠 Misconception detection +
+                            # targeted re-teaching. The AI
+                            # evaluator (modules/teacher.py) now
+                            # names the SPECIFIC wrong idea behind
+                            # an incorrect/partial answer (not just
+                            # "wrong") - record it, and if one was
+                            # found, generate a re-explanation that
+                            # directly corrects that misconception
+                            # instead of a generic recap.
+                            # ------------------------------------
+
+                            misconception = evaluation.get(
+                                "misconception",
+                                ""
+                            )
+
+                            record_misconception(
+                                state,
+                                expected_concept,
+                                misconception
+                            )
+
+                            if misconception:
+
+                                remediation_section = {
+                                    "title": (
+                                        f"Re-teaching: "
+                                        f"{expected_concept}"
+                                    ),
+                                    "description": (
+                                        "The student answered the "
+                                        "practice question with a "
+                                        "specific misconception. "
+                                        "Directly correct this "
+                                        "misconception - name what "
+                                        "they seem to believe, "
+                                        "explain clearly why it's "
+                                        "not quite right, and give "
+                                        "the correct understanding "
+                                        "with a simple example.\n\n"
+                                        f"Question: {question_text}\n"
+                                        f"Student answer: "
+                                        f"{student_answer}\n"
+                                        f"Misconception to correct: "
+                                        f"{misconception}"
+                                    ),
+                                    "key_points": [
+                                        f"Misconception: "
+                                        f"{misconception}"
+                                    ]
+                                }
+
+                                try:
+
+                                    remediation_text = (
+                                        generate_teacher_explanation(
+                                            remediation_section,
+                                            st.session_state
+                                            .cleaned_text,
+                                            st.session_state
+                                            .student_level,
+                                            st.session_state
+                                            .preferred_language
+                                        )
+                                    )
+
+                                except Exception:
+
+                                    remediation_text = (
+                                        f"It looks like there's a "
+                                        f"mix-up here: {misconception}"
+                                        f". Let's revisit "
+                                        f"{expected_concept}."
+                                    )
+
+                                st.session_state.section_remediation[
+                                    current_index
+                                ] = remediation_text
+
+                            else:
+
+                                st.session_state.section_remediation.pop(
+                                    current_index,
+                                    None
+                                )
+
 
                     # ------------------------------------------------
                     # Display feedback
@@ -2604,6 +2815,34 @@ if st.session_state.cleaned_text:
                         st.write(
                             f"Score: {evaluation.get('score', 0)} / 1"
                         )
+
+                        # --------------------------------------------
+                        # 🧠 Targeted re-teaching card - only shown
+                        # when a specific misconception was detected
+                        # for THIS section, so it doesn't linger
+                        # after a correct retry or for a generic
+                        # "didn't know it" wrong answer.
+                        # --------------------------------------------
+
+                        section_remediation_text = (
+                            st.session_state.section_remediation.get(
+                                current_index
+                            )
+                        )
+
+                        if (
+                            not evaluation.get("correct", False)
+                            and section_remediation_text
+                        ):
+
+                            with st.expander(
+                                "🧠 Let's clear up that mix-up",
+                                expanded=True
+                            ):
+
+                                st.markdown(
+                                    section_remediation_text
+                                )
 
 
                 # =================================================

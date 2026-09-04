@@ -159,12 +159,41 @@ def _parse_ai_evaluation(raw_text):
     else:
         score, correct = 0, False
 
+    # Pull out the "Misconception:" section - the specific wrong
+    # idea behind an incorrect/partial answer, not just "wrong".
+    # Stops at the next blank line or the end of the text.
+    misconception = ""
+
+    misconception_match = re.search(
+        r"misconception[:\s]*\n?\s*(.+?)(?:\n\s*\n|$)",
+        text,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+
+    if misconception_match:
+
+        candidate = misconception_match.group(1).strip()
+
+        if candidate and candidate.lower() not in ("none", "none.", "n/a"):
+            misconception = candidate
+
+    # Strip the "Misconception:" section back out of the text
+    # shown to the student - it's used internally to drive
+    # targeted re-teaching, not displayed as feedback verbatim
+    # (a raw "Misconception: None" line would just be noise for
+    # a correct answer).
+    display_feedback = re.sub(
+        r"\n*misconception[:\s]*\n?\s*.+?(?:\n\s*\n|$)",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL
+    ).strip()
+
     return {
         "score": score,
         "correct": correct,
-        # Show the full structured feedback to the student,
-        # not just the verdict line.
-        "feedback": text
+        "feedback": display_feedback or text,
+        "misconception": misconception
     }
 
 
