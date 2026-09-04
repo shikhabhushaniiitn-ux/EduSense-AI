@@ -1,4 +1,5 @@
 import streamlit as st
+import hashlib
 
 from modules.pdf_processor import (
     extract_text_from_pdf,
@@ -66,6 +67,11 @@ from modules.audio_teacher import (
     generate_speech,
     get_cache_key,
     build_synced_player_html
+)
+
+from modules.subject_visuals import (
+    detect_visual,
+    render_visual
 )
 
 import streamlit.components.v1 as components
@@ -148,10 +154,17 @@ defaults = {
     # a day you've already visited.
     "weekly_day_explanations": {},
 
+    "weekly_plan_id": "",
+
     # AI Teaching Voice - cache of generated (audio, word_timings)
     # per section, keyed by a hash of its text - so listening to
     # the same section twice doesn't re-call the TTS service.
-    "tts_cache": {}
+    "tts_cache": {},
+
+    # Subject-Aware Visuals - cache of the detected visual spec
+    # per section, keyed the same way as tts_cache, so the AI
+    # isn't re-asked to classify the same section on every rerun.
+    "visual_cache": {}
 }
 
 
@@ -310,6 +323,7 @@ else:
             st.session_state.weekly_answer_evaluation = None
 
             st.session_state.weekly_day_explanations = {}
+            st.session_state.weekly_plan_id = ""
 
             with st.spinner(
                 f"✨ Building study material on \"{topic_query}\"..."
@@ -424,6 +438,7 @@ if uploaded_file is not None:
         st.session_state.weekly_answer_evaluation = None
 
         st.session_state.weekly_day_explanations = {}
+        st.session_state.weekly_plan_id = ""
 
         with st.spinner(
             "📄 Processing your study material..."
@@ -944,6 +959,7 @@ if st.session_state.cleaned_text:
                     st.session_state.weekly_answer_evaluation = None
 
                     st.session_state.weekly_day_explanations = {}
+                    st.session_state.weekly_plan_id = ""
 
                     st.success(
                         "✅ Personalized lesson created!"
@@ -1087,11 +1103,35 @@ if st.session_state.cleaned_text:
             # day-navigation helpers are new.
             # ------------------------------------------------
 
-            if st.session_state.weekly_teaching_state is None:
+            plan_source = repr(lesson) + "|" + str(
+                st.session_state.student_level
+            ) + "|" + str(
+                st.session_state.preferred_language
+            )
+            plan_id = hashlib.md5(
+                plan_source.encode("utf-8")
+            ).hexdigest()[:10]
 
+            if (
+                st.session_state.weekly_teaching_state is None
+                or st.session_state.weekly_plan_id != plan_id
+            ):
                 st.session_state.weekly_teaching_state = (
                     initialize_weekly_lesson(lesson)
                 )
+                st.session_state.weekly_teaching_state.setdefault(
+                    "day_remediation", {}
+                )
+                st.session_state.weekly_teaching_state.setdefault(
+                    "weak_concepts_by_day", {}
+                )
+                st.session_state.weekly_teaching_state.setdefault(
+                    "day_results", {}
+                )
+                st.session_state.weekly_plan_id = plan_id
+                st.session_state.weekly_day_answer = ""
+                st.session_state.weekly_answer_evaluation = None
+                st.session_state.weekly_day_explanations = {}
 
             weekly_state = st.session_state.weekly_teaching_state
 
@@ -1144,19 +1184,11 @@ if st.session_state.cleaned_text:
             )
 
             # ------------------------------------------------
-            # Jump to any already-unlocked day (completed days,
-            # plus the current one). Keeps navigation flexible
-            # for review without letting students skip ahead.
+            # All days are available. Students can move ahead even
+            # when the current question is unanswered.
             # ------------------------------------------------
 
-            unlocked_indexes = sorted(
-                {0, current_day_index} | {
-                    idx for idx in range(total_days)
-                    if days[idx].get(
-                        "day_number", idx + 1
-                    ) in completed_days
-                }
-            )
+            unlocked_indexes = list(range(total_days))
 
             def _day_label(idx):
 
@@ -1183,7 +1215,6 @@ if st.session_state.cleaned_text:
                 unlocked_indexes,
                 index=unlocked_indexes.index(current_day_index),
                 format_func=_day_label,
-                key="weekly_day_jump"
             )
 
             if jump_choice != current_day_index:
@@ -1244,9 +1275,49 @@ if st.session_state.cleaned_text:
 
                     try:
 
+                        prior_weak_concepts = []
+                        prior_remediation = []
+
+                        for prior_day, concepts in weekly_state.get(
+                            "weak_concepts_by_day", {}
+                        ).items():
+                            try:
+                                prior_day_number = int(prior_day)
+                            except (TypeError, ValueError):
+                                prior_day_number = 0
+
+                            if prior_day_number < day_number:
+                                for concept in concepts:
+                                    if concept and concept not in prior_weak_concepts:
+                                        prior_weak_concepts.append(concept)
+
+                                remediation = weekly_state.get(
+                                    "day_remediation", {}
+                                ).get(prior_day, "")
+                                if remediation:
+                                    prior_remediation.append(remediation)
+
+                        adaptive_description = focus
+
+                        if prior_weak_concepts:
+                            adaptive_description += (
+                                "\n\nPrevious learning signals: The student had difficulty "
+                                "with these concepts: "
+                                + ", ".join(prior_weak_concepts)
+                                + ". Briefly revisit these concepts before "
+                                "building today's lesson and connect them to "
+                                "today's topic."
+                            )
+
+                        if prior_remediation:
+                            adaptive_description += (
+                                "\n\nPrevious teacher remediation:\n"
+                                + "\n".join(prior_remediation[-2:])
+                            )
+
                         day_section = {
                             "title": day_title,
-                            "description": focus,
+                            "description": adaptive_description,
                             "key_points": key_points
                         }
 
@@ -1356,6 +1427,61 @@ if st.session_state.cleaned_text:
                         scrolling=True
                     )
 
+            # ----------------------------------------------------
+            # 🎨 Subject-Aware Visual for this day (same detector
+            # as the single-lesson AI Teacher)
+            # ----------------------------------------------------
+
+            if day_cache_key not in st.session_state.visual_cache:
+
+                with st.spinner(
+                    "🎨 Preparing a visual..."
+                ):
+
+                    try:
+
+                        day_visual_spec = detect_visual(
+                            day_title,
+                            day_speech_text
+                        )
+
+                    except Exception as visual_error:
+
+                        print(
+                            f"Visual detection failed: {visual_error}"
+                        )
+
+                        day_visual_spec = None
+
+                    st.session_state.visual_cache[
+                        day_cache_key
+                    ] = day_visual_spec
+
+            cached_day_visual_spec = (
+                st.session_state.visual_cache.get(
+                    day_cache_key
+                )
+            )
+
+            if (
+                cached_day_visual_spec
+                and cached_day_visual_spec.get(
+                    "visual_type",
+                    "none"
+                ) != "none"
+            ):
+
+                with st.expander(
+                    "🎨 Visual: "
+                    + (
+                        cached_day_visual_spec.get("title")
+                        or cached_day_visual_spec.get("subject")
+                    ),
+                    expanded=True
+                ):
+
+                    render_visual(cached_day_visual_spec)
+
             day_already_done = (
                 day_number in completed_days
             )
@@ -1414,7 +1540,7 @@ if st.session_state.cleaned_text:
                         student_answer = st.radio(
                             "Choose your answer:",
                             options,
-                            key=f"weekly_mcq_{day_number}"
+                            key=f"weekly_mcq_{plan_id}_{day_number}"
                         )
 
                     else:
@@ -1423,7 +1549,7 @@ if st.session_state.cleaned_text:
                             "✍️ Your Answer",
                             value=st.session_state.weekly_day_answer,
                             placeholder="Write your answer here...",
-                            key=f"weekly_answer_{day_number}"
+                            key=f"weekly_answer_{plan_id}_{day_number}"
                         )
 
                         st.session_state.weekly_day_answer = (
@@ -1432,7 +1558,7 @@ if st.session_state.cleaned_text:
 
                     if st.button(
                         "🧠 Check My Answer",
-                        key=f"weekly_check_{day_number}"
+                        key=f"weekly_check_{plan_id}_{day_number}"
                     ):
 
                         if options:
@@ -1503,6 +1629,54 @@ if st.session_state.cleaned_text:
                             evaluation
                         )
 
+                        weekly_state.setdefault("day_results", {})
+                        weekly_state["day_results"][str(day_number)] = evaluation
+
+                        if evaluation.get("correct", False):
+                            weekly_state.setdefault("weak_concepts_by_day", {})
+                            weekly_state["weak_concepts_by_day"].pop(
+                                str(day_number), None
+                            )
+                            weekly_state.setdefault("day_remediation", {})
+                            weekly_state["day_remediation"].pop(
+                                str(day_number), None
+                            )
+                        else:
+                            weak_concept = str(expected_concept).strip()
+                            if weak_concept:
+                                weekly_state.setdefault("weak_concepts_by_day", {})
+                                weekly_state["weak_concepts_by_day"][str(day_number)] = [
+                                    weak_concept
+                                ]
+
+                                remediation_section = {
+                                    "title": f"Re-teaching: {weak_concept}",
+                                    "description": (
+                                        "The student answered this practice question incorrectly. "
+                                        "Re-teach the weak concept clearly and simply.\n\n"
+                                        f"Question: {question_text}\n"
+                                        f"Student answer: {student_answer}\n"
+                                        f"Teacher feedback: {evaluation.get('feedback', '')}"
+                                    ),
+                                    "key_points": [f"Weak concept: {weak_concept}"]
+                                }
+
+                                try:
+                                    remediation = generate_teacher_explanation(
+                                        remediation_section,
+                                        st.session_state.cleaned_text,
+                                        st.session_state.student_level,
+                                        st.session_state.preferred_language
+                                    )
+                                except Exception:
+                                    remediation = (
+                                        f"Let's revisit {weak_concept}. "
+                                        f"{evaluation.get('feedback', 'Review the concept and try again.')}"
+                                    )
+
+                                weekly_state.setdefault("day_remediation", {})
+                                weekly_state["day_remediation"][str(day_number)] = remediation
+
                         # A day unlocks the next one once attempted,
                         # regardless of correctness - this is meant
                         # to pace daily learning, not gate on a
@@ -1539,6 +1713,14 @@ if st.session_state.cleaned_text:
                                 )
                             )
 
+                            remediation = weekly_state.get(
+                                "day_remediation", {}
+                            ).get(str(day_number), "")
+
+                            if remediation:
+                                st.markdown("### 👨‍🏫 Teacher Re-teaching")
+                                st.markdown(remediation)
+
                 else:
 
                     # No question for this day - don't block
@@ -1566,7 +1748,7 @@ if st.session_state.cleaned_text:
                                     current_day_index
                                 )
                             )
-
+            
                             st.session_state.weekly_day_answer = ""
 
                             st.session_state.weekly_answer_evaluation = (
@@ -1577,34 +1759,18 @@ if st.session_state.cleaned_text:
 
                 with nav_col2:
 
-                    if day_number in weekly_state["completed_days"]:
-
-                        if st.button(
-                            "➡️ Next Day",
-                            key="weekly_next_day"
-                        ):
-
-                            weekly_state["current_day"] = (
-                                move_to_next_day(
-                                    current_day_index,
-                                    total_days
-                                )
-                            )
-
-                            st.session_state.weekly_day_answer = ""
-
-                            st.session_state.weekly_answer_evaluation = (
-                                None
-                            )
-
-                            st.rerun()
-
-                    else:
-
-                        st.caption(
-                            "Answer the question above to unlock "
-                            "the next day."
+                    if st.button(
+                        "➡️ Next Day",
+                        key=f"weekly_next_day_{plan_id}_{day_number}",
+                        disabled=(current_day_index >= total_days - 1)
+                    ):
+                        weekly_state["current_day"] = move_to_next_day(
+                            current_day_index,
+                            total_days
                         )
+                        st.session_state.weekly_day_answer = ""
+                        st.session_state.weekly_answer_evaluation = None
+                        st.rerun()
 
             # ==================================================
             # DAY 7: consolidated assessment + Learning Report
@@ -1660,7 +1826,7 @@ if st.session_state.cleaned_text:
                             answer = st.radio(
                                 "Choose your answer:",
                                 options,
-                                key=f"weekly_quiz_{i}"
+                                key=f"weekly_quiz_{plan_id}_{i}"
                             )
 
                             weekly_state["final_quiz_answers"][i] = (
@@ -1669,7 +1835,7 @@ if st.session_state.cleaned_text:
 
                     if st.button(
                         "🎯 Submit Week's Assessment",
-                        key="weekly_submit_quiz"
+                        key=f"weekly_submit_quiz_{plan_id}"
                     ):
 
                         score = 0
@@ -2206,6 +2372,78 @@ if st.session_state.cleaned_text:
                                 height=260,
                                 scrolling=True
                             )
+
+                    # --------------------------------------------
+                    # 🎨 Subject-Aware Visual
+                    #
+                    # AI classifies this section (Mathematics /
+                    # Physics / Biology / History / Programming /
+                    # Chemistry / General) and picks a matching
+                    # visual - equation, graph, process diagram,
+                    # timeline, code, or a relevant image. Cached
+                    # per section so it's only detected once, not
+                    # re-asked of the AI on every rerun.
+                    # --------------------------------------------
+
+                    if (
+                        explanation_cache_key
+                        not in st.session_state.visual_cache
+                    ):
+
+                        with st.spinner(
+                            "🎨 Preparing a visual..."
+                        ):
+
+                            try:
+
+                                visual_spec = detect_visual(
+                                    current_section.get(
+                                        "title",
+                                        ""
+                                    ),
+                                    st.session_state
+                                    .teacher_explanation
+                                )
+
+                            except Exception as visual_error:
+
+                                print(
+                                    "Visual detection failed: "
+                                    f"{visual_error}"
+                                )
+
+                                visual_spec = None
+
+                            st.session_state.visual_cache[
+                                explanation_cache_key
+                            ] = visual_spec
+
+                    cached_visual_spec = (
+                        st.session_state.visual_cache.get(
+                            explanation_cache_key
+                        )
+                    )
+
+                    if (
+                        cached_visual_spec
+                        and cached_visual_spec.get(
+                            "visual_type",
+                            "none"
+                        ) != "none"
+                    ):
+
+                        with st.expander(
+                            "🎨 Visual: "
+                            + (
+                                cached_visual_spec.get("title")
+                                or cached_visual_spec.get(
+                                    "subject"
+                                )
+                            ),
+                            expanded=True
+                        ):
+
+                            render_visual(cached_visual_spec)
 
 
                 # ------------------------------------------------
