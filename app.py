@@ -36,7 +36,8 @@ from modules.lesson_planner import (
 
 from modules.teacher import (
     generate_teacher_explanation,
-    generate_follow_up_question
+    generate_follow_up_question,
+    generate_visual_narration
 )
 
 from modules.assessment import (
@@ -75,7 +76,8 @@ from modules.audio_teacher import (
 
 from modules.subject_visuals import (
     detect_visual,
-    render_visual
+    render_visual,
+    plan_concept_visuals
 )
 
 import streamlit.components.v1 as components
@@ -179,7 +181,12 @@ defaults = {
     # Subject-Aware Visuals - cache of the detected visual spec
     # per section, keyed the same way as tts_cache, so the AI
     # isn't re-asked to classify the same section on every rerun.
-    "visual_cache": {}
+    "visual_cache": {},
+    # Concept-level teaching timeline. These maps survive reruns and let a
+    # section reveal its concepts (and their visuals) in teaching order.
+    "section_concept_progress": {},
+    "concept_explanations": {},
+    "visual_narrations": {}
 }
 
 
@@ -2342,6 +2349,9 @@ if st.session_state.cleaned_text:
 
                 st.session_state.section_remediation = {}
                 st.session_state.section_adaptations = {}
+                st.session_state.section_concept_progress = {}
+                st.session_state.concept_explanations = {}
+                st.session_state.visual_narrations = {}
 
                 st.rerun()
 
@@ -2432,15 +2442,11 @@ if st.session_state.cleaned_text:
 
                         try:
 
-                            section_visual_spec = detect_visual(
-                                current_section.get("title", ""),
-                                current_section.get("description", "")
-                                + "\n"
-                                + "\n".join(
-                                    current_section.get(
-                                        "key_points", []
-                                    )
-                                )
+                            section_visual_spec = plan_concept_visuals(
+                                current_section,
+                                st.session_state.student_level,
+                                source_material=st.session_state.cleaned_text,
+                                concept_performance=state.get("concept_performance", {})
                             )
 
                         except Exception as visual_error:
@@ -2456,11 +2462,32 @@ if st.session_state.cleaned_text:
                             section_visual_key
                         ] = section_visual_spec
 
-                cached_section_visual_spec = (
+                cached_section_visual_plan = (
                     st.session_state.visual_cache.get(
                         section_visual_key
                     )
                 )
+                concept_position = state.setdefault(
+                    "section_concept_progress", {}
+                ).get(current_index, 0)
+                concept_count = len(current_section.get("concepts") or current_section.get("key_points") or [])
+                current_visual_spec = (
+                    next((item for item in (cached_section_visual_plan or [])
+                          if item.get("concept_index") == concept_position), None)
+                )
+                active_concept = (
+                    current_visual_spec.get("concept_id")
+                    if current_visual_spec else
+                    (current_section.get("concepts") or current_section.get("key_points") or [current_section.get("title", "Current concept")])[min(concept_position, max(0, concept_count - 1))]
+                )
+                concept_teaching_section = dict(current_section)
+                concept_teaching_section["title"] = str(active_concept)
+                concept_teaching_section["description"] = (
+                    f"Teach this concept as part of {current_section.get('title', '')}. "
+                    f"{current_section.get('description', '')}"
+                )
+                concept_teaching_section["key_points"] = [str(active_concept)]
+                concept_explanation_key = f"{section_visual_key}_concept_{concept_position}"
 
                 # ------------------------------------------------
                 # 🎨 Subject-Aware Visual - rendered HERE, as soon
@@ -2476,9 +2503,9 @@ if st.session_state.cleaned_text:
                 # code, a physics simulation, or a relevant image.
                 # ------------------------------------------------
 
-                if (
-                    cached_section_visual_spec
-                    and cached_section_visual_spec.get(
+                if current_visual_spec and (
+                    current_visual_spec
+                    and current_visual_spec.get(
                         "visual_type",
                         "none"
                     ) != "none"
@@ -2487,10 +2514,10 @@ if st.session_state.cleaned_text:
                     with st.expander(
                         "🎨 Visual: "
                         + (
-                            cached_section_visual_spec.get(
+                            current_visual_spec.get(
                                 "title"
                             )
-                            or cached_section_visual_spec.get(
+                            or current_visual_spec.get(
                                 "subject"
                             )
                         ),
@@ -2498,14 +2525,14 @@ if st.session_state.cleaned_text:
                     ):
 
                         render_visual(
-                            cached_section_visual_spec
+                            current_visual_spec
                         )
 
                 # ------------------------------------------------
                 # Generate explanation
                 # ------------------------------------------------
 
-                if not st.session_state.teacher_explanation:
+                if concept_explanation_key not in st.session_state.concept_explanations:
 
                     with st.spinner(
                         "👨‍🏫 Preparing your explanation..."
@@ -2515,17 +2542,15 @@ if st.session_state.cleaned_text:
 
                             explanation = (
                                 generate_teacher_explanation(
-                                    current_section,
+                                    concept_teaching_section,
                                     st.session_state.cleaned_text,
                                     st.session_state.student_level,
                                     st.session_state.preferred_language,
-                                    visual_spec=cached_section_visual_spec
+                                    visual_spec=current_visual_spec
                                 )
                             )
 
-                            st.session_state.teacher_explanation = (
-                                explanation
-                            )
+                            st.session_state.concept_explanations[concept_explanation_key] = explanation
 
                         except Exception as e:
 
@@ -2538,14 +2563,17 @@ if st.session_state.cleaned_text:
                 # Explanation
                 # ------------------------------------------------
 
-                if st.session_state.teacher_explanation:
+                current_explanation = st.session_state.concept_explanations.get(
+                    concept_explanation_key, ""
+                )
+                if current_explanation:
 
                     st.markdown(
                         "### 👨‍🏫 Explanation"
                     )
 
                     st.markdown(
-                        st.session_state.teacher_explanation
+                        current_explanation
                     )
 
                     # --------------------------------------------
@@ -2557,14 +2585,30 @@ if st.session_state.cleaned_text:
                     # the (small) TTS latency cost for nothing.
                     # --------------------------------------------
 
+                    visual_narration = ""
+                    if current_visual_spec:
+                        narration_key = current_visual_spec["visual_id"] + "_" + st.session_state.preferred_language
+                        if narration_key not in st.session_state.visual_narrations:
+                            st.session_state.visual_narrations[narration_key] = generate_visual_narration(
+                                current_visual_spec,
+                                st.session_state.student_level,
+                                st.session_state.preferred_language
+                            )
+                        visual_narration = st.session_state.visual_narrations[narration_key]
+                        current_visual_spec["narration"] = visual_narration
+                        current_visual_spec["explanation"] = visual_narration
+                        st.markdown("**What to notice in the visual**")
+                        st.write(visual_narration)
+
+                    voice_text = (visual_narration + "\n\n" + current_explanation).strip()
                     explanation_cache_key = get_cache_key(
-                        st.session_state.teacher_explanation,
+                        voice_text,
                         st.session_state.preferred_language
                     )
 
                     if st.button(
                         "🔊 Listen to this explanation",
-                        key=f"listen_{current_index}"
+                        key=f"listen_{current_index}_{concept_position}"
                     ):
 
                         if (
@@ -2580,8 +2624,7 @@ if st.session_state.cleaned_text:
 
                                     audio_bytes, word_timings = (
                                         generate_speech(
-                                            st.session_state
-                                            .teacher_explanation,
+                                            voice_text,
                                             st.session_state
                                             .preferred_language
                                         )
@@ -2638,6 +2681,23 @@ if st.session_state.cleaned_text:
                 # Interactive question
                 # ------------------------------------------------
 
+                # A section's checkpoint is intentionally held until its
+                # concept timeline has been taught. This is the state-machine
+                # boundary that prevents all visuals appearing at section
+                # open and prevents a checkpoint interrupting concept two.
+                if concept_position < max(0, concept_count - 1):
+                    if st.button(
+                        "Continue to the next concept",
+                        key=f"next_concept_{current_index}_{concept_position}",
+                        icon=":material/arrow_forward:"
+                    ):
+                        state.setdefault("section_concept_progress", {})[current_index] = concept_position + 1
+                        st.rerun()
+                    st.caption(
+                        f"Concept {concept_position + 1} of {concept_count}. "
+                        "The checkpoint will appear after this section's concepts."
+                    )
+
                 interactive_questions = lesson.get(
                     "interactive_questions",
                     []
@@ -2653,7 +2713,8 @@ if st.session_state.cleaned_text:
                 ).get(current_index, 0)
                 interactive_question = (
                     section_questions[question_position]
-                    if question_position < len(section_questions)
+                    if concept_position >= max(0, concept_count - 1)
+                    and question_position < len(section_questions)
                     else None
                 )
 
@@ -2981,6 +3042,23 @@ if st.session_state.cleaned_text:
                                 st.markdown(
                                     section_remediation_text
                                 )
+
+                                alternative_key = f"remedial_visual_{current_index}_{expected_concept}"
+                                if alternative_key not in st.session_state.visual_cache:
+                                    alternative_section = {
+                                        "title": f"Simpler view: {expected_concept}",
+                                        "description": "Use one concrete, beginner-friendly representation.",
+                                        "concepts": [expected_concept]
+                                    }
+                                    st.session_state.visual_cache[alternative_key] = plan_concept_visuals(
+                                        alternative_section, "Beginner", max_visuals=1,
+                                        source_material=st.session_state.cleaned_text,
+                                        concept_performance={expected_concept: 0}
+                                    )
+                                remedial_plan = st.session_state.visual_cache.get(alternative_key, [])
+                                if remedial_plan:
+                                    st.caption("A simpler visual framing")
+                                    render_visual(remedial_plan[0])
 
                         adaptation = st.session_state.section_adaptations.get(
                             current_index

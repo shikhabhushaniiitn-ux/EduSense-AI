@@ -896,7 +896,11 @@ def build_progressive_sections(
                     f"Why is {concept} important?",
 
                     f"Understand the basic principles of {concept}."
-                ]
+                ],
+                # A section can be taught as a sequence of concepts.  Keep
+                # this separate from the prose key points so downstream
+                # teaching tools can anchor explanations and visuals.
+                "concepts": [concept]
             })
 
     # --------------------------------------------------------
@@ -950,8 +954,8 @@ def build_progressive_sections(
                 "description":
                     language_text["core_concepts_description"],
 
-                "key_points":
-                    core_points
+                "key_points": core_points,
+                "concepts": concepts[1:5]
             })
 
         # Relationships
@@ -1310,6 +1314,28 @@ def attach_section_questions(sections):
                 question_text
             )
 
+    return sections
+
+
+def ensure_section_concepts(sections):
+    """Give every legacy/AI lesson section a stable concept sequence.
+
+    Older plans contain only ``key_points``.  This compatibility layer keeps
+    those plans usable without forcing a wholesale lesson-plan migration.
+    """
+    for section in sections or []:
+        concepts = section.get("concepts")
+        if not isinstance(concepts, list) or not concepts:
+            concepts = section.get("key_points") or [section.get("title", "")]
+        cleaned = []
+        seen = set()
+        for concept in concepts:
+            concept = str(concept).strip()
+            key = normalize_text(concept)
+            if concept and key and key not in seen:
+                seen.add(key)
+                cleaned.append(concept)
+        section["concepts"] = cleaned or [str(section.get("title", "Current concept"))]
     return sections
 
 
@@ -2135,6 +2161,8 @@ def generate_local_lesson_plan(
             focus_found
     }
 
+    ensure_section_concepts(lesson_plan["sections"])
+
     return lesson_plan
 
 
@@ -2550,6 +2578,8 @@ def validate_ai_lesson_plan(
     lesson_plan[
         "final_quiz"
     ] = validated_quiz
+
+    ensure_section_concepts(lesson_plan["sections"])
 
     return lesson_plan
 

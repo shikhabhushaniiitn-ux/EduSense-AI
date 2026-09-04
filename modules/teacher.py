@@ -281,6 +281,33 @@ Return only the teaching explanation.
     )
 
 
+def generate_visual_narration(visual_spec, level="Beginner", language="English"):
+    """Return short voice-ready narration for the currently visible visual."""
+
+    concept = visual_spec.get("concept_id", visual_spec.get("title", "this concept"))
+    visual_type = visual_spec.get("visual_type", "visual")
+    details = visual_spec.get("process_steps") or visual_spec.get("steps") or []
+    detail_text = "; ".join(details[:3])
+    prompt = f"""
+Create 2-4 concise, spoken teaching sentences that explain the visual now
+visible to a {level} learner. Use {language}. Explain the concept and what
+the learner should notice; do not mention implementation.
+Concept: {concept}
+Visual type: {visual_type}
+Visual details: {detail_text}
+"""
+    try:
+        narration = generate_text(prompt, max_tokens=220)
+        if narration:
+            return clean_response(narration)
+    except Exception as error:
+        print("Visual narration generation error:", error)
+
+    if detail_text:
+        return f"This {visual_type} explains {concept}. Notice: {detail_text}."
+    return f"This {visual_type} highlights the key idea behind {concept}."
+
+
 # ============================================================
 # FALLBACK EXPLANATION
 # ============================================================

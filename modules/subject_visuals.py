@@ -626,6 +626,112 @@ def detect_visual(section_title, section_content):
     return _apply_heuristic_overrides(spec, section_content)
 
 
+def _source_excerpt_for_concept(source_material, concept, limit=1400):
+    """Return source-grounded context nearest a concept, never invented text."""
+    source_material = source_material or ""
+    if not source_material:
+        return ""
+    words = [word for word in re.findall(r"[A-Za-z0-9_]+", concept.lower()) if len(word) > 3]
+    position = min((source_material.lower().find(word) for word in words if source_material.lower().find(word) >= 0), default=-1)
+    if position < 0:
+        return source_material[:limit]
+    start = max(0, position - limit // 3)
+    return source_material[start:start + limit]
+
+
+def _visual_complexity(level, concept, section, performance=None):
+    """Choose detail without making a beginner's first visual overwhelming."""
+    concept_count = len(section.get("concepts") or section.get("key_points") or [])
+    difficulty = len(str(concept).split()) + concept_count
+    struggling = performance is not None and performance < 60
+    if struggling or level == "Beginner":
+        return "simple"
+    if level == "Advanced" and difficulty >= 5:
+        return "advanced"
+    return "intermediate"
+
+
+def _build_visual_prompt(section, concept, spec, complexity, source_excerpt):
+    """Auditable concept-specific direction for a renderer or future generator."""
+    relationships = "; ".join((spec.get("process_steps") or spec.get("steps") or [])[:4])
+    return (
+        f"Create a {complexity} educational {spec.get('visual_type', 'diagram')} for "
+        f"{spec.get('subject', 'General')} on the concept '{concept}', within the lesson "
+        f"section '{section.get('title', '')}'. Purpose: explain this concept accurately to "
+        f"the learner. Include clear labels and only relationships supported by this source: "
+        f"{source_excerpt[:500]}. Key relationships: {relationships or 'use only source-grounded relationships'}. "
+        "Prioritize technical accuracy and readable educational clarity; do not add unrelated facts, "
+        "decorative text, or unsupported labels."
+    )
+
+
+def plan_concept_visuals(section, level="Beginner", max_visuals=None,
+                         source_material="", concept_performance=None):
+    """Build a bounded, source-grounded visual plan for individual concepts.
+
+    A plan item is deliberately richer than a render spec: it records the
+    concept, chosen representation, timing, complexity, source evidence, and
+    narration placeholder.  It is safe to store in session state unchanged.
+    """
+
+    if not section:
+        return []
+
+    concepts = section.get("concepts") or section.get("key_points") or []
+    concepts = [str(concept).strip() for concept in concepts if str(concept).strip()]
+    if not concepts:
+        concepts = [section.get("title", "")]
+
+    if max_visuals is None:
+        # Quality cap: a section may have several visuals, but never a visual
+        # for every sentence. Advanced sections can justify one extra only.
+        max_visuals = 2 if level == "Beginner" else (3 if level == "Intermediate" else 4)
+    max_visuals = max(1, min(int(max_visuals), 5))
+
+    plans = []
+    seen = set()
+    for concept_index, concept in enumerate(concepts):
+        if len(plans) >= max_visuals:
+            break
+        normalized = concept.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        source_excerpt = _source_excerpt_for_concept(source_material, concept)
+        content = (
+            f"Subject context / section: {section.get('title', '')}\n"
+            f"Concept to teach: {concept}\n"
+            f"Section learning goal: {section.get('description', '')}\n"
+            f"Source-grounded material:\n{source_excerpt or 'No source excerpt available.'}"
+        )
+        spec = detect_visual(concept, content)
+        if spec.get("visual_type") == "none":
+            continue
+
+        performance = (concept_performance or {}).get(concept)
+        complexity = _visual_complexity(level, concept, section, performance)
+        display_order = len(plans) + 1
+
+        spec.update({
+            "visual_id": f"concept-{display_order}-{normalized[:40]}",
+            "section_id": str(section.get("title", "section")),
+            "concept_id": concept,
+            "concept_index": concept_index,
+            "visual_required": True,
+            "purpose": "explain_concept",
+            "complexity": complexity,
+            "display_order": display_order,
+            "display_timing": "after_concept_introduction",
+            "prompt": _build_visual_prompt(section, concept, spec, complexity, source_excerpt),
+            "explanation": "",
+            "narration": "",
+            "source_grounding": source_excerpt,
+        })
+        plans.append(spec)
+
+    return plans
+
+
 # ============================================================
 # RENDER: EQUATION
 # ============================================================
@@ -1144,7 +1250,7 @@ def render_image(spec):
         st.image(
             image_url,
             caption=query,
-            use_container_width=True
+            width="stretch"
         )
 
     else:
@@ -1182,7 +1288,7 @@ def render_map(spec):
         st.image(
             map_url,
             caption=query,
-            use_container_width=True
+            width="stretch"
         )
 
     else:
