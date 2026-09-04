@@ -657,6 +657,51 @@ def get_quiz_question_count(duration_minutes):
 
 
 # ============================================================
+# IN-LESSON CHECKPOINTS
+# ============================================================
+
+def get_checkpoint_count(duration_minutes):
+    """Return a practical number of understanding checks for a lesson."""
+
+    try:
+        duration_minutes = int(duration_minutes)
+    except (TypeError, ValueError):
+        duration_minutes = 20
+
+    if duration_minutes <= 15:
+        return 2
+    if duration_minutes <= 30:
+        return 3
+    if duration_minutes <= 45:
+        return 4
+    return 5
+
+
+def extract_learning_topics(document_text, max_topics=15):
+    """Return a small, source-grounded list for the optional topic picker."""
+
+    if not document_text or not document_text.strip():
+        return []
+
+    topics = []
+    for candidate in extract_headings(document_text, max_headings=max_topics * 2):
+        candidate = " ".join(str(candidate).split()).strip()
+        if 3 <= len(candidate) <= 100 and candidate not in topics:
+            topics.append(candidate)
+        if len(topics) >= max_topics:
+            return topics
+
+    for candidate in extract_generic_concepts(document_text, max_concepts=max_topics):
+        candidate = " ".join(str(candidate).split()).strip()
+        if 3 <= len(candidate) <= 80 and candidate not in topics:
+            topics.append(candidate)
+        if len(topics) >= max_topics:
+            break
+
+    return topics
+
+
+# ============================================================
 # LANGUAGE CONTENT
 # ============================================================
 
@@ -1266,6 +1311,85 @@ def attach_section_questions(sections):
             )
 
     return sections
+
+
+def distribute_interactive_checkpoints(sections, interactive_questions, duration_minutes):
+    """Place duration-appropriate checks after taught sections.
+
+    Plans from the AI and the local fallback have slightly different
+    question shapes.  This normalizes both into questions explicitly tied
+    to a section index, so the teacher never displays a question before its
+    material or accidentally reuses the last question for later sections.
+    """
+
+    candidates = []
+    for index, section in enumerate(sections):
+        title = normalize_text(section.get("title", ""))
+        if "practice" not in title and "quiz" not in title:
+            candidates.append(index)
+
+    if not candidates:
+        return []
+
+    # Every substantive teaching section gets a queue. Longer lessons and
+    # larger sections receive more checks, so this is not a fixed "three per
+    # section" rule. Questions remain sequential in the UI.
+    total_teaching_minutes = max(
+        1, sum(sections[index].get("duration_minutes", 0) for index in candidates)
+    )
+    positions = []
+    for section_index in candidates:
+        section_minutes = sections[section_index].get("duration_minutes", 0)
+        question_count = 1
+        if duration_minutes >= 30 and section_minutes * 2 >= total_teaching_minutes / len(candidates):
+            question_count = 2
+        if duration_minutes >= 45 and section_minutes * 3 >= total_teaching_minutes / len(candidates):
+            question_count = 3
+        positions.extend([section_index] * min(question_count, 3))
+
+    source_questions = list(interactive_questions or [])
+    normalized = []
+    used_text = []
+
+    per_section_number = {}
+    for question_number, section_index in enumerate(positions):
+        section = sections[section_index]
+        within_section = per_section_number.get(section_index, 0)
+        per_section_number[section_index] = within_section + 1
+        question = section.get("think_about_it") if within_section == 0 else None
+
+        if not question:
+            section_title = section.get("title", "")
+            question = next(
+                (
+                    item for item in source_questions
+                    if item.get("section_title") == section_title
+                ),
+                None
+            )
+
+        if not question and question_number < len(source_questions):
+            question = source_questions[question_number]
+
+        if not question:
+            question = build_section_question(section, section_index)
+
+        question_copy = question.copy()
+        question_text = question_copy.get("question", "")
+        if not question_text or is_duplicate_text(question_text, used_text):
+            question_copy = build_section_question(section, section_index + within_section + 1)
+            question_text = question_copy["question"]
+
+        question_copy["section_index"] = section_index
+        question_copy["section_title"] = section.get("title", "")
+        question_copy["question_id"] = f"section-{section_index}-question-{within_section + 1}"
+        question_copy["concept_id"] = question_copy.get("concept", question_copy.get("expected_concept", section.get("title", "")))
+        question_copy["difficulty"] = "advanced" if within_section >= 2 else ("application" if within_section else "foundation")
+        question_copy["purpose"] = "check_understanding"
+        normalized.append(question_copy)
+        used_text.append(question_text)
+
+    return normalized
 
 
 # ============================================================
@@ -1944,29 +2068,11 @@ def generate_local_lesson_plan(
     # compatibility with your current app.
     # --------------------------------------------------------
 
-    interactive_questions = []
-
-    for section in sections:
-
-        think_about_it = section.get(
-            "think_about_it"
-        )
-
-        if think_about_it:
-
-            question_copy = (
-                think_about_it.copy()
-            )
-
-            question_copy[
-                "section_title"
-            ] = section.get(
-                "title"
-            )
-
-            interactive_questions.append(
-                question_copy
-            )
+    interactive_questions = distribute_interactive_checkpoints(
+        sections,
+        [],
+        duration_minutes
+    )
 
     # --------------------------------------------------------
     # FINAL QUIZ
@@ -2401,7 +2507,11 @@ def validate_ai_lesson_plan(
 
     lesson_plan[
         "interactive_questions"
-    ] = validated_interactive
+    ] = distribute_interactive_checkpoints(
+        lesson_plan["sections"],
+        validated_interactive,
+        duration_minutes
+    )
 
     # --------------------------------------------------------
     # FINAL QUIZ
@@ -3848,6 +3958,38 @@ def _generate_local_weekly_plan(
     }
 
 
+def add_weekly_question_queues(plan):
+    """Give each teaching day a small, concept-linked question queue."""
+
+    for day in plan.get("days", []):
+        if day.get("day_number") == 7:
+            continue
+        existing = day.get("questions") or []
+        if not existing and day.get("question"):
+            existing = [day["question"]]
+        pseudo_section = {
+            "title": day.get("day_title", "Today's concept"),
+            "key_points": day.get("key_points", []),
+            "description": day.get("focus", "")
+        }
+        # Two checks are a practical baseline for a multi-concept day; use
+        # distinct templates and preserve any planner-generated first check.
+        while len(existing) < 2:
+            existing.append(build_section_question(pseudo_section, len(existing) + 1))
+        normalized = []
+        for index, question in enumerate(existing[:3]):
+            item = question.copy()
+            item["question_id"] = f"day-{day.get('day_number')}-question-{index + 1}"
+            item["concept_id"] = item.get("concept", item.get("expected_concept", day.get("day_title", "")))
+            item["difficulty"] = "application" if index else "foundation"
+            item["purpose"] = "check_understanding"
+            normalized.append(item)
+        day["questions"] = normalized
+        # Retain legacy field for compatibility with saved/generated plans.
+        day["question"] = normalized[0]
+    return plan
+
+
 def generate_weekly_lesson_plan(
     document_text,
     level="Beginner",
@@ -3886,7 +4028,7 @@ def generate_weekly_lesson_plan(
         plan["focus_topic_requested"] = focus_topic
         plan["focus_topic_found"] = True
 
-        return plan
+        return add_weekly_question_queues(plan)
 
     except Exception as error:
 
@@ -3905,7 +4047,7 @@ def generate_weekly_lesson_plan(
             plan["focus_topic_requested"] = focus_topic
             plan["focus_topic_found"] = True
 
-            return plan
+            return add_weekly_question_queues(plan)
 
         except Exception as retry_error:
 
@@ -3931,4 +4073,4 @@ def generate_weekly_lesson_plan(
             plan["focus_topic_requested"] = focus_topic
             plan["focus_topic_found"] = focus_found
 
-            return plan
+            return add_weekly_question_queues(plan)

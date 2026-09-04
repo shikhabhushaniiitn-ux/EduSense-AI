@@ -30,11 +30,13 @@ from modules.qa import (
 
 from modules.lesson_planner import (
     generate_lesson_plan,
-    generate_weekly_lesson_plan
+    generate_weekly_lesson_plan,
+    extract_learning_topics
 )
 
 from modules.teacher import (
-    generate_teacher_explanation
+    generate_teacher_explanation,
+    generate_follow_up_question
 )
 
 from modules.assessment import (
@@ -52,6 +54,7 @@ from modules.teaching_engine import (
     update_concept_performance,
     record_attempt,
     update_difficulty,
+    add_adaptation_event,
     get_learning_summary,
     initialize_weekly_lesson,
     get_current_day,
@@ -139,6 +142,12 @@ defaults = {
     # AI Teacher - cached per section index so it's only
     # generated once per wrong answer, not on every rerun.
     "section_remediation": {},
+
+    # Per-checkpoint mastery loop for normal lessons. A checkpoint stays
+    # pending until its follow-up answer demonstrates understanding.
+    "section_adaptations": {},
+
+    "section_question_progress": {},
 
     "final_quiz_answers": {},
 
@@ -314,6 +323,9 @@ else:
 
             st.session_state.student_answer = ""
 
+            st.session_state.section_remediation = {}
+            st.session_state.section_adaptations = {}
+
             st.session_state.final_quiz_answers = {}
 
             st.session_state.quiz_submitted = False
@@ -428,6 +440,9 @@ if uploaded_file is not None:
         st.session_state.answer_evaluation = None
 
         st.session_state.student_answer = ""
+
+        st.session_state.section_remediation = {}
+        st.session_state.section_adaptations = {}
 
         st.session_state.final_quiz_answers = {}
 
@@ -857,17 +872,25 @@ if st.session_state.cleaned_text:
 
 
     # --------------------------------------------------------
-    # Optional: focus on a specific topic/section
+    # Optional source-grounded topic selection. The existing free-text focus
+    # behavior is replaced by choices extracted from this material so a
+    # selected topic reliably scopes the actual planner input.
     # --------------------------------------------------------
 
-    focus_topic = st.text_input(
-        "🔎 Focus on a specific topic/section (optional)",
-        value=st.session_state.focus_topic,
-        placeholder=(
-            "Leave blank for the whole document, or type e.g. "
-            "\"Gradient Descent\" or \"Chapter 3\""
-        )
+    topic_options = ["Entire Material"] + extract_learning_topics(
+        st.session_state.document_text
     )
+    selected_topic = st.selectbox(
+        "📚 What do you want to learn?",
+        topic_options,
+        index=(
+            topic_options.index(st.session_state.focus_topic)
+            if st.session_state.focus_topic in topic_options else 0
+        ),
+        help="Entire Material keeps the original full-source lesson behavior."
+    )
+
+    focus_topic = "" if selected_topic == "Entire Material" else selected_topic
 
     st.session_state.focus_topic = focus_topic
 
@@ -949,6 +972,9 @@ if st.session_state.cleaned_text:
                     st.session_state.answer_evaluation = None
 
                     st.session_state.student_answer = ""
+
+                    st.session_state.section_remediation = {}
+                    st.session_state.section_adaptations = {}
 
                     st.session_state.final_quiz_answers = {}
 
@@ -1528,9 +1554,18 @@ if st.session_state.cleaned_text:
 
             if not is_last_day:
 
-                question = current_day.get(
-                    "question",
-                    {}
+                day_questions = current_day.get("questions") or [
+                    current_day.get("question", {})
+                ]
+                day_question_progress = weekly_state.setdefault(
+                    "day_question_progress", {}
+                )
+                day_question_position = day_question_progress.get(
+                    str(day_number), 0
+                )
+                question = (
+                    day_questions[day_question_position]
+                    if day_question_position < len(day_questions) else {}
                 )
 
                 # Some AI responses may return Day 7-style question
@@ -1559,7 +1594,7 @@ if st.session_state.cleaned_text:
                 if question_text:
 
                     st.markdown(
-                        "### 💡 Practice Question"
+                        f"### 💡 Practice Question {day_question_position + 1} of {len(day_questions)}"
                     )
 
                     st.write(
@@ -1669,6 +1704,10 @@ if st.session_state.cleaned_text:
                         weekly_state["day_results"][str(day_number)] = evaluation
 
                         if evaluation.get("correct", False):
+                            day_question_progress[str(day_number)] = (
+                                day_question_position + 1
+                            )
+                            weekly_state.setdefault("attempts", {})[day_number] = 0
                             weekly_state.setdefault("weak_concepts_by_day", {})
                             weekly_state["weak_concepts_by_day"].pop(
                                 str(day_number), None
@@ -1757,14 +1796,46 @@ if st.session_state.cleaned_text:
                                 weekly_state.setdefault("day_remediation", {})
                                 weekly_state["day_remediation"][str(day_number)] = remediation
 
-                        # A day unlocks the next one once attempted,
-                        # regardless of correctness - this is meant
-                        # to pace daily learning, not gate on a
-                        # perfect score.
-                        mark_day_completed(
-                            weekly_state,
-                            day_number
-                        )
+                            retries = weekly_state.get("attempts", {}).get(
+                                day_number, 0
+                            )
+                            if retries > 3:
+                                day_question_progress[str(day_number)] = (
+                                    day_question_position + 1
+                                )
+                                weekly_state.setdefault("attempts", {})[day_number] = 0
+                                add_adaptation_event(
+                                    weekly_state,
+                                    day_number,
+                                    "weak_after_three_retries",
+                                    "Maximum adaptive retries reached"
+                                )
+                            else:
+                                # Replace—not repeat—the failed check with a
+                                # simpler alternate framing of the same concept.
+                                day_questions[day_question_position]["question"] = (
+                                    generate_follow_up_question(
+                                        expected_concept,
+                                        question_text,
+                                        student_answer,
+                                        level=("Beginner" if retries > 1 else st.session_state.student_level),
+                                        language=st.session_state.preferred_language,
+                                        simplify=retries > 1
+                                    )
+                                )
+
+                        # A day unlocks after all of its checks have been
+                        # attempted successfully, or after the bounded
+                        # adaptive retry path below releases a weak concept.
+                        if day_question_progress.get(str(day_number), 0) >= len(day_questions):
+                            mark_day_completed(weekly_state, day_number)
+
+                        if evaluation.get("correct", False):
+                            st.rerun()
+                        elif day_question_progress.get(str(day_number), 0) > day_question_position:
+                            st.rerun()
+                        else:
+                            st.rerun()
 
                     evaluation = (
                         st.session_state.weekly_answer_evaluation
@@ -2269,6 +2340,9 @@ if st.session_state.cleaned_text:
 
                 st.session_state.student_answer = ""
 
+                st.session_state.section_remediation = {}
+                st.session_state.section_adaptations = {}
+
                 st.rerun()
 
 
@@ -2570,18 +2644,21 @@ if st.session_state.cleaned_text:
                 )
 
 
-                if interactive_questions:
+                section_questions = [
+                    question for question in interactive_questions
+                    if question.get("section_index") == current_index
+                ]
+                question_position = state.setdefault(
+                    "section_question_progress", {}
+                ).get(current_index, 0)
+                interactive_question = (
+                    section_questions[question_position]
+                    if question_position < len(section_questions)
+                    else None
+                )
 
-                    question_index = min(
-                        current_index,
-                        len(interactive_questions) - 1
-                    )
 
-                    interactive_question = (
-                        interactive_questions[
-                            question_index
-                        ]
-                    )
+                if interactive_question:
 
                     question_text = (
                         interactive_question.get(
@@ -2602,7 +2679,7 @@ if st.session_state.cleaned_text:
 
 
                     st.markdown(
-                        "### 💡 Think About It"
+                        f"### 💡 Checkpoint {question_position + 1} of {len(section_questions)}"
                     )
 
                     st.write(
@@ -2614,12 +2691,23 @@ if st.session_state.cleaned_text:
                     # Student answer
                     # ------------------------------------------------
 
-                    student_answer = st.text_area(
-                        "✍️ Your Answer",
-                        value=st.session_state.student_answer,
-                        placeholder="Write your answer here...",
-                        key=f"student_answer_{current_index}"
+                    question_options = interactive_question.get(
+                        "options", []
                     )
+
+                    if question_options:
+                        student_answer = st.radio(
+                            "Choose your answer:",
+                            question_options,
+                            key=f"student_mcq_{current_index}"
+                        )
+                    else:
+                        student_answer = st.text_area(
+                            "✍️ Your Answer",
+                            value=st.session_state.student_answer,
+                            placeholder="Write your answer here...",
+                            key=f"student_answer_{current_index}"
+                        )
 
 
                     st.session_state.student_answer = student_answer
@@ -2634,14 +2722,27 @@ if st.session_state.cleaned_text:
                         key=f"check_answer_{current_index}"
                     ):
 
-                        evaluation = evaluate_answer(
-                            student_answer,
-                            expected_concept,
-                            question=question_text,
-                            study_material=st.session_state.cleaned_text,
-                            level=st.session_state.student_level,
-                            language=st.session_state.preferred_language
-                        )
+                        if question_options:
+                            is_correct = student_answer == interactive_question.get(
+                                "correct_answer", ""
+                            )
+                            evaluation = {
+                                "score": 1 if is_correct else 0,
+                                "correct": is_correct,
+                                "feedback": (
+                                    "Correct!" if is_correct else
+                                    "Not quite. Let's revisit this idea."
+                                )
+                            }
+                        else:
+                            evaluation = evaluate_answer(
+                                student_answer,
+                                expected_concept,
+                                question=question_text,
+                                study_material=st.session_state.cleaned_text,
+                                level=st.session_state.student_level,
+                                language=st.session_state.preferred_language
+                            )
 
                         st.session_state.answer_evaluation = (
                             evaluation
@@ -2682,10 +2783,12 @@ if st.session_state.cleaned_text:
                             False
                         ):
 
-                            mark_section_completed(
-                                state,
+                            next_question_position = question_position + 1
+                            state["section_question_progress"][
                                 current_index
-                            )
+                            ] = next_question_position
+                            if next_question_position >= len(section_questions):
+                                mark_section_completed(state, current_index)
 
                             # A correct retry clears any earlier
                             # re-teaching card for this section so
@@ -2694,6 +2797,11 @@ if st.session_state.cleaned_text:
                                 current_index,
                                 None
                             )
+                            st.session_state.section_adaptations.pop(
+                                current_index,
+                                None
+                            )
+                            st.rerun()
 
                         else:
 
@@ -2720,7 +2828,16 @@ if st.session_state.cleaned_text:
                                 misconception
                             )
 
-                            if misconception:
+                            # Every incorrect answer gets a re-teach. A named
+                            # misconception makes it more targeted; otherwise
+                            # the evaluator's feedback describes the gap.
+                            learning_gap = (
+                                misconception
+                                or evaluation.get("feedback", "")
+                                or "The core idea still needs review."
+                            )
+
+                            if learning_gap:
 
                                 remediation_section = {
                                     "title": (
@@ -2728,25 +2845,21 @@ if st.session_state.cleaned_text:
                                         f"{expected_concept}"
                                     ),
                                     "description": (
-                                        "The student answered the "
-                                        "practice question with a "
-                                        "specific misconception. "
-                                        "Directly correct this "
-                                        "misconception - name what "
-                                        "they seem to believe, "
-                                        "explain clearly why it's "
-                                        "not quite right, and give "
-                                        "the correct understanding "
-                                        "with a simple example.\n\n"
+                                        "The student answered the practice "
+                                        "question incorrectly. Explain why "
+                                        "their reasoning is incomplete or "
+                                        "incorrect, then give a different "
+                                        "explanation or analogy and a simple "
+                                        "example.\n\n"
                                         f"Question: {question_text}\n"
                                         f"Student answer: "
                                         f"{student_answer}\n"
-                                        f"Misconception to correct: "
-                                        f"{misconception}"
+                                        f"Learning gap to correct: "
+                                        f"{learning_gap}"
                                     ),
                                     "key_points": [
-                                        f"Misconception: "
-                                        f"{misconception}"
+                                        f"Learning gap: "
+                                        f"{learning_gap}"
                                     ]
                                 }
 
@@ -2777,11 +2890,36 @@ if st.session_state.cleaned_text:
                                     current_index
                                 ] = remediation_text
 
-                            else:
+                                simplify = state.get(
+                                    "attempts", {}
+                                ).get(current_index, 0) > 1
 
-                                st.session_state.section_remediation.pop(
+                                follow_up_question = (
+                                    generate_follow_up_question(
+                                        expected_concept,
+                                        question_text,
+                                        student_answer,
+                                        level=st.session_state.student_level,
+                                        language=st.session_state.preferred_language,
+                                        simplify=simplify
+                                    )
+                                )
+
+                                st.session_state.section_adaptations[
+                                    current_index
+                                ] = {
+                                    "follow_up_question": follow_up_question,
+                                    "follow_up_evaluation": None,
+                                    "simplified": simplify,
+                                    "retry_count": 1,
+                                    "question_position": question_position
+                                }
+
+                                add_adaptation_event(
+                                    state,
                                     current_index,
-                                    None
+                                    "re_explain_and_follow_up",
+                                    learning_gap
                                 )
 
 
@@ -2844,12 +2982,170 @@ if st.session_state.cleaned_text:
                                     section_remediation_text
                                 )
 
+                        adaptation = st.session_state.section_adaptations.get(
+                            current_index
+                        )
+
+                        if adaptation:
+                            st.markdown("### 🔁 Quick follow-up check")
+                            st.write(adaptation["follow_up_question"])
+
+                            follow_up_answer = st.text_area(
+                                "Your follow-up answer",
+                                placeholder="Try the new question in your own words...",
+                                key=f"follow_up_answer_{current_index}"
+                            )
+
+                            if st.button(
+                                "✅ Check follow-up answer",
+                                key=f"check_follow_up_{current_index}"
+                            ):
+                                follow_up_evaluation = evaluate_answer(
+                                    follow_up_answer,
+                                    expected_concept,
+                                    question=adaptation["follow_up_question"],
+                                    study_material=st.session_state.cleaned_text,
+                                    level=st.session_state.student_level,
+                                    language=st.session_state.preferred_language
+                                )
+
+                                adaptation["follow_up_evaluation"] = (
+                                    follow_up_evaluation
+                                )
+                                save_answer(
+                                    state,
+                                    adaptation["follow_up_question"],
+                                    follow_up_answer,
+                                    follow_up_evaluation,
+                                    concept=expected_concept,
+                                    section_index=current_index
+                                )
+                                update_concept_performance(
+                                    state,
+                                    expected_concept,
+                                    follow_up_evaluation.get("score", 0)
+                                )
+                                record_attempt(state, current_index)
+                                update_difficulty(state, follow_up_evaluation)
+
+                                if follow_up_evaluation.get("correct", False):
+                                    next_question_position = question_position + 1
+                                    state["section_question_progress"][
+                                        current_index
+                                    ] = next_question_position
+                                    if next_question_position >= len(section_questions):
+                                        mark_section_completed(state, current_index)
+                                    st.session_state.section_remediation.pop(
+                                        current_index, None
+                                    )
+                                    st.session_state.section_adaptations.pop(
+                                        current_index, None
+                                    )
+                                    add_adaptation_event(
+                                        state,
+                                        current_index,
+                                        "mastered_after_follow_up",
+                                        "Student answered the follow-up correctly"
+                                    )
+                                    st.rerun()
+                                else:
+                                    # Three remedial checks is the ceiling:
+                                    # record the weakness, then let the lesson
+                                    # move forward rather than trapping a student.
+                                    if adaptation.get("retry_count", 1) >= 3:
+                                        state["section_question_progress"][
+                                            current_index
+                                        ] = question_position + 1
+                                        if question_position + 1 >= len(section_questions):
+                                            mark_section_completed(state, current_index)
+                                        add_adaptation_event(
+                                            state,
+                                            current_index,
+                                            "weak_after_three_retries",
+                                            "Maximum adaptive retries reached"
+                                        )
+                                        st.session_state.section_adaptations.pop(
+                                            current_index, None
+                                        )
+                                        st.warning(
+                                            "We'll revisit this weak concept later. You can continue."
+                                        )
+                                        st.rerun()
+
+                                    # Keep the mastery loop active but lower
+                                    # the next question's difficulty.
+                                    retry_section = {
+                                        "title": f"Simpler re-teaching: {expected_concept}",
+                                        "description": (
+                                            "The student is still struggling. "
+                                            "Use a very simple, concrete analogy and a "
+                                            "small worked example before asking again.\n\n"
+                                            f"Question: {adaptation['follow_up_question']}\n"
+                                            f"Student answer: {follow_up_answer}"
+                                        ),
+                                        "key_points": [f"Core idea: {expected_concept}"]
+                                    }
+                                    try:
+                                        st.session_state.section_remediation[
+                                            current_index
+                                        ] = generate_teacher_explanation(
+                                            retry_section,
+                                            st.session_state.cleaned_text,
+                                            "Beginner",
+                                            st.session_state.preferred_language
+                                        )
+                                    except Exception:
+                                        pass
+
+                                    adaptation["follow_up_question"] = (
+                                        generate_follow_up_question(
+                                            expected_concept,
+                                            adaptation["follow_up_question"],
+                                            follow_up_answer,
+                                            level="Beginner",
+                                            language=st.session_state.preferred_language,
+                                            simplify=True
+                                        )
+                                    )
+                                    adaptation["follow_up_evaluation"] = None
+                                    adaptation["simplified"] = True
+                                    adaptation["retry_count"] = (
+                                        adaptation.get("retry_count", 1) + 1
+                                    )
+                                    add_adaptation_event(
+                                        state,
+                                        current_index,
+                                        "simplify_and_retry",
+                                        "Follow-up answer was still insufficient"
+                                    )
+
+                            follow_up_evaluation = adaptation.get(
+                                "follow_up_evaluation"
+                            )
+                            if follow_up_evaluation:
+                                if follow_up_evaluation.get("correct", False):
+                                    st.success("Great — you can continue to the next section.")
+                                else:
+                                    st.warning(
+                                        follow_up_evaluation.get(
+                                            "feedback",
+                                            "Let's try one simpler check."
+                                        )
+                                    )
+
 
                 # =================================================
                 # NAVIGATION
                 # =================================================
 
                 st.divider()
+
+                checkpoint_pending = (
+                    interactive_question is not None
+                    and current_index not in state.get(
+                        "completed_sections", []
+                    )
+                )
 
                 nav1, nav2, nav3 = st.columns(
                     [1, 1, 1]
@@ -2879,6 +3175,9 @@ if st.session_state.cleaned_text:
                         st.session_state.answer_evaluation = None
 
                         st.session_state.student_answer = ""
+
+                        st.session_state.section_remediation = {}
+                        st.session_state.section_adaptations = {}
 
                         st.rerun()
 
@@ -2913,6 +3212,7 @@ if st.session_state.cleaned_text:
                         disabled=(
                             current_index
                             >= total_sections - 1
+                            or checkpoint_pending
                         )
                     ):
 

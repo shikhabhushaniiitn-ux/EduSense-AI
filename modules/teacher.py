@@ -469,6 +469,50 @@ Rules:
 
 
 # ============================================================
+# ADAPTIVE FOLLOW-UP QUESTION
+# ============================================================
+
+def generate_follow_up_question(
+    concept,
+    original_question,
+    student_answer,
+    level="Beginner",
+    language="English",
+    simplify=False
+):
+    """Generate a fresh mastery check after a targeted re-teach."""
+
+    difficulty = "very simple and concrete" if simplify else "appropriate"
+    prompt = f"""
+You are an adaptive teacher. Write ONE new follow-up question that checks
+whether a student now understands the concept after re-teaching.
+
+Concept: {concept}
+Original question: {original_question}
+Student's earlier answer: {student_answer}
+Student level: {level}
+Preferred language: {language}
+
+The new question must test the same learning goal but use a different
+example or framing. Make it {difficulty} for this student. Do not repeat
+the original question, give the answer, add feedback, or use Markdown.
+Return only the question.
+"""
+
+    try:
+        question = generate_text(prompt, max_tokens=180)
+        if question and question.strip():
+            return clean_response(question)
+    except Exception as error:
+        print("Follow-up question generation error:", error)
+
+    if simplify:
+        return f"In one simple sentence, what is the main idea of {concept}?"
+
+    return f"Using a different example, how would you explain {concept}?"
+
+
+# ============================================================
 # EVALUATE STUDENT ANSWER
 # ============================================================
 

@@ -29,6 +29,11 @@ def initialize_lesson(lesson_plan):
 
         "completed_sections": [],
 
+        # Position of the active question within each section's question
+        # queue. Kept in lesson state so Streamlit reruns cannot leak a
+        # question from one section into another.
+        "section_question_progress": {},
+
         "answers": [],
 
         "score": 0,
