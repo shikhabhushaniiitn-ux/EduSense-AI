@@ -3,7 +3,8 @@ import hashlib
 
 from modules.pdf_processor import (
     extract_text_from_pdf,
-    get_pdf_page_count
+    get_pdf_page_count,
+    extract_text_from_upload
 )
 
 from modules.text_processor import (
@@ -78,6 +79,22 @@ from modules.subject_visuals import (
     detect_visual,
     render_visual,
     plan_concept_visuals
+)
+
+from modules.teaching_timeline import (
+    attach_audio_metadata,
+    build_section_timeline,
+    current_event
+)
+
+from modules.video_pipeline import (
+    build_video_scenes,
+    compose_segment,
+    refresh_scene_manifest,
+)
+
+from modules.avatar_provider import (
+    build_avatar_player_html
 )
 
 import streamlit.components.v1 as components
@@ -186,7 +203,11 @@ defaults = {
     # section reveal its concepts (and their visuals) in teaching order.
     "section_concept_progress": {},
     "concept_explanations": {},
-    "visual_narrations": {}
+    "visual_narrations": {},
+    # Ordered, serializable teaching events keyed by section.  The teaching
+    # engine owns the cursor; this cache makes reruns and replay deterministic.
+    "teaching_timeline": {},
+    "video_scene_cache": {}
 }
 
 
@@ -231,14 +252,14 @@ with st.sidebar:
         """
         **Current Features**
 
-        📄 PDF Processing  
-        💡 Topic Mode (no PDF needed)  
+        📄 PDF / DOCX / PPTX / TXT Processing  
+        💡 Topic Mode (no upload needed)  
         🧠 Semantic Search  
         🔍 Document Q&A  
         📝 AI Summary  
         📚 Source-based Answers  
         🎯 Personalized Lesson  
-        🧑‍🏫 AI Teacher  
+        🧑‍🏫 AI Teacher with Talking Avatar  
         ❓ Interactive Quiz  
         📊 Learning Report  
         📅 7-Day Plan
@@ -267,8 +288,8 @@ if input_mode == "📄 Upload Study Material":
 
     uploaded_file = st.file_uploader(
         "📄 Upload your study material",
-        type=["pdf"],
-        help="Upload a PDF containing your study material."
+        type=["pdf", "docx", "pptx", "txt"],
+        help="Upload a PDF, Word (.docx), PowerPoint (.pptx), or text (.txt) file containing your study material."
     )
 
 
@@ -475,18 +496,17 @@ if uploaded_file is not None:
             try:
 
                 # ------------------------------------------------
-                # Page count
+                # Extract text (+ page count where applicable)
+                #
+                # extract_text_from_upload() dispatches by file
+                # extension - PDF still goes through the exact
+                # same extract_text_from_pdf()/get_pdf_page_count()
+                # calls as before; DOCX/PPTX/TXT are new and return
+                # page_count = "N/A" since those formats don't have
+                # a PDF-style page concept.
                 # ------------------------------------------------
 
-                page_count = get_pdf_page_count(
-                    uploaded_file
-                )
-
-                # ------------------------------------------------
-                # Extract text
-                # ------------------------------------------------
-
-                text = extract_text_from_pdf(
+                text, page_count = extract_text_from_upload(
                     uploaded_file
                 )
 
@@ -531,7 +551,7 @@ if uploaded_file is not None:
             except Exception as e:
 
                 st.error(
-                    f"❌ Could not process the PDF: {e}"
+                    f"❌ Could not process the file: {e}"
                 )
 
 
@@ -1535,11 +1555,11 @@ if st.session_state.cleaned_text:
                 if cached_audio:
 
                     components.html(
-                        build_synced_player_html(
+                        build_avatar_player_html(
                             cached_audio,
                             cached_timings
                         ),
-                        height=260,
+                        height=340,
                         scrolling=True
                     )
 
@@ -2352,6 +2372,8 @@ if st.session_state.cleaned_text:
                 st.session_state.section_concept_progress = {}
                 st.session_state.concept_explanations = {}
                 st.session_state.visual_narrations = {}
+                st.session_state.teaching_timeline = {}
+                st.session_state.video_scene_cache = {}
 
                 st.rerun()
 
@@ -2467,18 +2489,47 @@ if st.session_state.cleaned_text:
                         section_visual_key
                     )
                 )
-                concept_position = state.setdefault(
-                    "section_concept_progress", {}
-                ).get(current_index, 0)
-                concept_count = len(current_section.get("concepts") or current_section.get("key_points") or [])
-                current_visual_spec = (
-                    next((item for item in (cached_section_visual_plan or [])
-                          if item.get("concept_index") == concept_position), None)
+                concepts = current_section.get("concepts") or current_section.get("key_points") or [current_section.get("title", "Current concept")]
+                concept_count = len(concepts)
+                section_questions_for_timeline = [
+                    question for question in lesson.get("interactive_questions", [])
+                    if question.get("section_index") == current_index
+                ]
+                timeline_key = f"section_timeline_{current_index}_{current_section.get('title', '')}"
+                if timeline_key not in st.session_state.teaching_timeline:
+                    st.session_state.teaching_timeline[timeline_key] = build_section_timeline(
+                        current_index, concepts, {}, cached_section_visual_plan,
+                        {}, section_questions_for_timeline
+                    )
+                section_timeline = st.session_state.teaching_timeline[timeline_key]
+                # Task-2 scene manifest mirrors the timeline. It is rebuilt
+                # cheaply from cached event data and does not call an avatar
+                # service or render a video on Streamlit reruns.
+                if timeline_key not in st.session_state.video_scene_cache:
+                    st.session_state.video_scene_cache[timeline_key] = compose_segment(
+                        build_video_scenes(section_timeline)
+                    )
+                scene_manifest = st.session_state.video_scene_cache[timeline_key]
+                refresh_scene_manifest(scene_manifest, section_timeline)
+                event_cursor = state.setdefault("section_timeline_cursors", {}).get(current_index, 0)
+                active_event = current_event(section_timeline, event_cursor)
+                active_scene = next(
+                    (
+                        scene for scene in scene_manifest.get("scenes", [])
+                        if scene.get("event_id") == (active_event or {}).get("event_id")
+                    ),
+                    None,
                 )
+                section_question_count = len(section_questions_for_timeline)
+                displayed_question_position = (
+                    active_event.get("question_index", 0)
+                    if active_event and active_event.get("event_type") == "question"
+                    else state.setdefault("section_question_progress", {}).get(current_index, 0)
+                )
+                concept_position = active_event.get("concept_index", 0) if active_event else 0
+                current_visual_spec = active_event.get("visual") if active_event else None
                 active_concept = (
-                    current_visual_spec.get("concept_id")
-                    if current_visual_spec else
-                    (current_section.get("concepts") or current_section.get("key_points") or [current_section.get("title", "Current concept")])[min(concept_position, max(0, concept_count - 1))]
+                    active_event.get("concept_id") if active_event else concepts[min(concept_position, max(0, concept_count - 1))]
                 )
                 concept_teaching_section = dict(current_section)
                 concept_teaching_section["title"] = str(active_concept)
@@ -2488,6 +2539,38 @@ if st.session_state.cleaned_text:
                 )
                 concept_teaching_section["key_points"] = [str(active_concept)]
                 concept_explanation_key = f"{section_visual_key}_concept_{concept_position}"
+
+                # A compact classroom header is driven by the same timeline
+                # cursor as the teaching flow, so it cannot drift away from
+                # what the student is actually seeing or hearing.
+                with st.container(border=True):
+                    st.markdown("### AI teacher presentation")
+                    status_left, status_middle, status_right = st.columns(3)
+                    status_left.metric("Section", f"{current_index + 1} / {total_sections}")
+                    status_middle.metric("Concept", f"{concept_position + 1} / {concept_count}")
+                    status_right.metric(
+                        "Teaching step",
+                        (active_event or {}).get("event_type", "complete").replace("_", " ").title()
+                    )
+                    st.progress(
+                        min(1.0, (event_cursor + 1) / max(1, len(section_timeline)))
+                    )
+                    st.caption(f"Currently teaching: {active_concept}")
+                    if section_question_count:
+                        st.caption(
+                            f"Checkpoint: {min(displayed_question_position + 1, section_question_count)} "
+                            f"/ {section_question_count}"
+                        )
+                    if active_scene:
+                        st.caption(
+                            f"Presentation scene {event_cursor + 1} / {len(section_timeline)} "
+                            f"({scene_manifest.get('renderer', 'local_mock').replace('_', ' ')})"
+                        )
+                    if current_visual_spec:
+                        st.info(
+                            "Visual explanation — "
+                            + (current_visual_spec.get("title") or str(active_concept))
+                        )
 
                 # ------------------------------------------------
                 # 🎨 Subject-Aware Visual - rendered HERE, as soon
@@ -2503,7 +2586,7 @@ if st.session_state.cleaned_text:
                 # code, a physics simulation, or a relevant image.
                 # ------------------------------------------------
 
-                if current_visual_spec and (
+                if active_event and active_event.get("event_type") in ("visual", "visual_explanation") and current_visual_spec and (
                     current_visual_spec
                     and current_visual_spec.get(
                         "visual_type",
@@ -2532,7 +2615,11 @@ if st.session_state.cleaned_text:
                 # Generate explanation
                 # ------------------------------------------------
 
-                if concept_explanation_key not in st.session_state.concept_explanations:
+                if (
+                    active_event
+                    and active_event.get("event_type") == "explanation"
+                    and concept_explanation_key not in st.session_state.concept_explanations
+                ):
 
                     with st.spinner(
                         "👨‍🏫 Preparing your explanation..."
@@ -2551,6 +2638,7 @@ if st.session_state.cleaned_text:
                             )
 
                             st.session_state.concept_explanations[concept_explanation_key] = explanation
+                            active_event["text"] = explanation
 
                         except Exception as e:
 
@@ -2563,18 +2651,18 @@ if st.session_state.cleaned_text:
                 # Explanation
                 # ------------------------------------------------
 
-                current_explanation = st.session_state.concept_explanations.get(
-                    concept_explanation_key, ""
+                current_explanation = (
+                    st.session_state.concept_explanations.get(concept_explanation_key, "")
+                    if active_event and active_event.get("event_type") == "explanation" else ""
                 )
-                if current_explanation:
+                if current_explanation or (active_event and active_event.get("event_type") == "visual_explanation"):
 
                     st.markdown(
                         "### 👨‍🏫 Explanation"
                     )
 
-                    st.markdown(
-                        current_explanation
-                    )
+                    if current_explanation:
+                        st.markdown(current_explanation)
 
                     # --------------------------------------------
                     # 🔊 AI Teaching Voice (zero-cost, Edge TTS)
@@ -2586,7 +2674,7 @@ if st.session_state.cleaned_text:
                     # --------------------------------------------
 
                     visual_narration = ""
-                    if current_visual_spec:
+                    if active_event and active_event.get("event_type") == "visual_explanation" and current_visual_spec:
                         narration_key = current_visual_spec["visual_id"] + "_" + st.session_state.preferred_language
                         if narration_key not in st.session_state.visual_narrations:
                             st.session_state.visual_narrations[narration_key] = generate_visual_narration(
@@ -2597,17 +2685,18 @@ if st.session_state.cleaned_text:
                         visual_narration = st.session_state.visual_narrations[narration_key]
                         current_visual_spec["narration"] = visual_narration
                         current_visual_spec["explanation"] = visual_narration
+                        active_event["text"] = visual_narration
                         st.markdown("**What to notice in the visual**")
                         st.write(visual_narration)
 
-                    voice_text = (visual_narration + "\n\n" + current_explanation).strip()
+                    voice_text = (visual_narration or current_explanation).strip()
                     explanation_cache_key = get_cache_key(
                         voice_text,
                         st.session_state.preferred_language
                     )
 
                     if st.button(
-                        "🔊 Listen to this explanation",
+                        "Play or replay narration",
                         key=f"listen_{current_index}_{concept_position}"
                     ):
 
@@ -2636,6 +2725,11 @@ if st.session_state.cleaned_text:
                                         audio_bytes,
                                         word_timings
                                     )
+                                    attach_audio_metadata(
+                                        active_event,
+                                        explanation_cache_key,
+                                        word_timings
+                                    )
 
                                 except Exception as tts_error:
 
@@ -2658,13 +2752,15 @@ if st.session_state.cleaned_text:
                         if cached_audio:
 
                             components.html(
-                                build_synced_player_html(
+                                build_avatar_player_html(
                                     cached_audio,
                                     cached_timings
                                 ),
-                                height=260,
+                                height=340,
                                 scrolling=True
                             )
+                            with st.expander("Captions / transcript"):
+                                st.write(voice_text)
 
                     # --------------------------------------------
                     # 🔊 AI Teaching Voice ends here; the visual
@@ -2681,21 +2777,20 @@ if st.session_state.cleaned_text:
                 # Interactive question
                 # ------------------------------------------------
 
-                # A section's checkpoint is intentionally held until its
-                # concept timeline has been taught. This is the state-machine
-                # boundary that prevents all visuals appearing at section
-                # open and prevents a checkpoint interrupting concept two.
-                if concept_position < max(0, concept_count - 1):
+                # Advance only non-interactive events. Question events pause
+                # here until the existing assessment/adaptation flow releases
+                # them, preserving the lesson's interactive nature.
+                if active_event and active_event.get("event_type") != "question":
                     if st.button(
-                        "Continue to the next concept",
-                        key=f"next_concept_{current_index}_{concept_position}",
+                        "Continue",
+                        key=f"next_event_{current_index}_{event_cursor}",
                         icon=":material/arrow_forward:"
                     ):
-                        state.setdefault("section_concept_progress", {})[current_index] = concept_position + 1
+                        state.setdefault("section_timeline_cursors", {})[current_index] = event_cursor + 1
                         st.rerun()
                     st.caption(
-                        f"Concept {concept_position + 1} of {concept_count}. "
-                        "The checkpoint will appear after this section's concepts."
+                        f"Concept {concept_position + 1} of {concept_count} · "
+                        f"{active_event.get('event_type', 'teaching').replace('_', ' ')}"
                     )
 
                 interactive_questions = lesson.get(
@@ -2708,12 +2803,14 @@ if st.session_state.cleaned_text:
                     question for question in interactive_questions
                     if question.get("section_index") == current_index
                 ]
-                question_position = state.setdefault(
-                    "section_question_progress", {}
-                ).get(current_index, 0)
+                question_position = (
+                    active_event.get("question_index", 0)
+                    if active_event and active_event.get("event_type") == "question"
+                    else state.setdefault("section_question_progress", {}).get(current_index, 0)
+                )
                 interactive_question = (
                     section_questions[question_position]
-                    if concept_position >= max(0, concept_count - 1)
+                    if active_event and active_event.get("event_type") == "question"
                     and question_position < len(section_questions)
                     else None
                 )
@@ -2760,14 +2857,15 @@ if st.session_state.cleaned_text:
                         student_answer = st.radio(
                             "Choose your answer:",
                             question_options,
-                            key=f"student_mcq_{current_index}"
+                            key=f"student_mcq_{current_index}_{question_position}"
                         )
+
                     else:
                         student_answer = st.text_area(
                             "✍️ Your Answer",
                             value=st.session_state.student_answer,
                             placeholder="Write your answer here...",
-                            key=f"student_answer_{current_index}"
+                            key=f"student_answer_{current_index}_{question_position}"
                         )
 
 
@@ -2848,6 +2946,9 @@ if st.session_state.cleaned_text:
                             state["section_question_progress"][
                                 current_index
                             ] = next_question_position
+                            state.setdefault("section_timeline_cursors", {})[current_index] = event_cursor + 1
+                            st.session_state.answer_evaluation = None
+                            st.session_state.student_answer = ""
                             if next_question_position >= len(section_questions):
                                 mark_section_completed(state, current_index)
 
@@ -3111,6 +3212,9 @@ if st.session_state.cleaned_text:
                                     state["section_question_progress"][
                                         current_index
                                     ] = next_question_position
+                                    state.setdefault("section_timeline_cursors", {})[current_index] = event_cursor + 1
+                                    st.session_state.answer_evaluation = None
+                                    st.session_state.student_answer = ""
                                     if next_question_position >= len(section_questions):
                                         mark_section_completed(state, current_index)
                                     st.session_state.section_remediation.pop(
@@ -3134,6 +3238,9 @@ if st.session_state.cleaned_text:
                                         state["section_question_progress"][
                                             current_index
                                         ] = question_position + 1
+                                        state.setdefault("section_timeline_cursors", {})[current_index] = event_cursor + 1
+                                        st.session_state.answer_evaluation = None
+                                        st.session_state.student_answer = ""
                                         if question_position + 1 >= len(section_questions):
                                             mark_section_completed(state, current_index)
                                         add_adaptation_event(
@@ -3224,6 +3331,10 @@ if st.session_state.cleaned_text:
                         "completed_sections", []
                     )
                 )
+                timeline_pending = (
+                    active_event is not None
+                    and active_event.get("event_type") != "question"
+                )
 
                 nav1, nav2, nav3 = st.columns(
                     [1, 1, 1]
@@ -3291,6 +3402,7 @@ if st.session_state.cleaned_text:
                             current_index
                             >= total_sections - 1
                             or checkpoint_pending
+                            or timeline_pending
                         )
                     ):
 

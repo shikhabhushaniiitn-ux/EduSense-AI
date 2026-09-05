@@ -34,6 +34,11 @@ def initialize_lesson(lesson_plan):
         # question from one section into another.
         "section_question_progress": {},
 
+        # Cursor into the ordered teaching events for each section. Kept in
+        # the engine state (not a widget) so a Streamlit rerun cannot skip or
+        # replay a lesson event accidentally.
+        "section_timeline_cursors": {},
+
         "answers": [],
 
         "score": 0,
