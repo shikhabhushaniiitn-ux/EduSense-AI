@@ -2,21 +2,20 @@ import re
 
 
 def clean_text(text):
-    """Clean extracted PDF text."""
+    """
+    Clean extracted document text.
+    Preserves multilingual scripts (Devanagari, Hindi, Tamil, etc.)
+    and mathematical symbols while removing unprintable control codes.
+    """
+    if not text:
+        return ""
 
-    # Replace multiple spaces/newlines
-    text = re.sub(
-        r"\s+",
-        " ",
-        text
-    )
+    # Replace multiple spaces/newlines with single space
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
 
-    # Remove unusual control characters
-    text = re.sub(
-        r"[^\x00-\x7F]+",
-        " ",
-        text
-    )
+    # Remove unprintable control characters (except newline, carriage return, tab)
+    text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", " ", text)
 
     return text.strip()
 

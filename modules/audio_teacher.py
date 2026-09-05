@@ -32,29 +32,35 @@ import edge_tts
 # ============================================================
 
 LANGUAGE_VOICES = {
-    "English": "en-US-AriaNeural",
-    "Hindi": "hi-IN-SwaraNeural",
-
-    # Edge TTS has no dedicated "Hinglish" voice - the Hindi
-    # voice reads mixed Hindi/English text reasonably naturally,
-    # so it's the closest available match.
-    "Hinglish": "hi-IN-SwaraNeural"
+    "English": {"female": "en-US-AriaNeural", "male": "en-US-GuyNeural"},
+    "Hindi": {"female": "hi-IN-SwaraNeural", "male": "hi-IN-MadhurNeural"},
+    "Hinglish": {"female": "hi-IN-SwaraNeural", "male": "hi-IN-MadhurNeural"},
+    "Tamil": {"female": "ta-IN-PallaviNeural", "male": "ta-IN-ValluvarNeural"},
+    "Telugu": {"female": "te-IN-ShrutiNeural", "male": "te-IN-MohanNeural"},
+    "Bengali": {"female": "bn-IN-TanishaaNeural", "male": "bn-IN-BashkarNeural"},
+    "Marathi": {"female": "mr-IN-AarohiNeural", "male": "mr-IN-ManoharNeural"},
+    "Gujarati": {"female": "gu-IN-DhwaniNeural", "male": "gu-IN-NiranjanNeural"},
+    "Kannada": {"female": "kn-IN-SapnaNeural", "male": "kn-IN-GaganNeural"},
+    "Malayalam": {"female": "ml-IN-SobhanaNeural", "male": "ml-IN-MidhunNeural"},
+    "Spanish": {"female": "es-ES-ElviraNeural", "male": "es-ES-AlvaroNeural"},
+    "French": {"female": "fr-FR-DeniseNeural", "male": "fr-FR-HenriNeural"},
+    "German": {"female": "de-DE-KatjaNeural", "male": "de-DE-ConradNeural"},
 }
 
 DEFAULT_VOICE = "en-US-AriaNeural"
 
 
-def get_voice_for_language(language):
+def get_voice_for_language(language, gender="female"):
     """
-    Map your app's existing language selector value to an Edge
-    TTS voice name. Unknown/missing language falls back to
-    English rather than erroring.
+    Map language and teacher gender to an Edge TTS voice.
+    Falls back to English if the language is unknown.
     """
-
-    return LANGUAGE_VOICES.get(
-        language,
-        DEFAULT_VOICE
-    )
+    lang_entry = LANGUAGE_VOICES.get(language)
+    if not lang_entry:
+        return DEFAULT_VOICE
+    if isinstance(lang_entry, dict):
+        return lang_entry.get(gender.lower(), lang_entry.get("female", DEFAULT_VOICE))
+    return lang_entry
 
 
 # ============================================================
@@ -130,15 +136,12 @@ async def _synthesize(text, voice):
     return audio_bytes, word_timings
 
 
-def generate_speech(text, language="English"):
+def generate_speech(text, language="English", gender="female"):
     """
     Synchronous wrapper around the async Edge TTS call, since
     Streamlit scripts run in a plain synchronous context.
 
-    Returns (audio_bytes, word_timings). Returns (None, []) if
-    there's no text to speak, and re-raises any real failure
-    (e.g. no internet access) so the caller can show a friendly
-    error instead of silently doing nothing.
+    Returns (audio_bytes, word_timings).
     """
 
     cleaned_text = prepare_text_for_speech(text)
@@ -146,7 +149,7 @@ def generate_speech(text, language="English"):
     if not cleaned_text:
         return None, []
 
-    voice = get_voice_for_language(language)
+    voice = get_voice_for_language(language, gender=gender)
 
     audio_bytes, word_timings = asyncio.run(
         _synthesize(cleaned_text, voice)

@@ -693,3 +693,77 @@ Return only the feedback.
             "### Misconception\n"
             "None"
         )
+
+
+# ============================================================
+# IN-LESSON STUDENT QUERY HANDLER
+#
+# Fulfills Assessment Task 2:
+# "Extend the AI Teacher so that it can interact with the learner
+# and adapt the lesson based on their responses. Answer follow-up
+# questions while maintaining lesson context."
+# ============================================================
+
+def answer_in_lesson_query(
+    student_query,
+    current_section_title,
+    current_section_content,
+    study_material="",
+    level="Beginner",
+    language="English",
+    teacher_persona="Dr. Sophia"
+):
+    """
+    Answer a student's spontaneous question or request for clarification
+    during an ongoing lesson, maintaining the context of what is currently
+    being taught.
+    """
+    if not student_query or not student_query.strip():
+        return "Please ask a question."
+
+    prompt = f"""
+You are {teacher_persona}, an empathetic and expert human-like AI Educator teaching a live lesson.
+
+The student has paused the lesson to ask you a question or request clarification.
+
+CURRENT LESSON TOPIC:
+{current_section_title}
+
+CURRENT LESSON CONTEXT:
+{current_section_content[:2000]}
+
+STUDENT'S QUESTION / REQUEST:
+"{student_query}"
+
+STUDENT LEVEL:
+{level}
+
+PREFERRED LANGUAGE:
+{language}
+
+LANGUAGE RULES:
+- If English: Respond naturally in clear English.
+- If Hindi: Respond in Hindi (Devenagari script).
+- If Hinglish: Respond conversationally in natural Hinglish (mix of Hindi + English words).
+
+TEACHING INSTRUCTIONS:
+1. Address the student's exact question directly and warmly.
+2. Relate your explanation back to the current topic ({current_section_title}).
+3. Use a simple, relatable real-world analogy if the student is confused.
+4. Keep the response concise (2-4 paragraphs maximum) so the student can resume their lesson smoothly.
+5. Conclude with a brief encouraging check (e.g. "Does that make sense, or would you like another example?").
+6. Do not mention that you are an AI.
+"""
+    try:
+        response = generate_text(prompt, max_tokens=600, temperature=0.3)
+        if response and response.strip():
+            return clean_response(response)
+    except Exception as e:
+        print(f"Error answering in-lesson query: {e}")
+
+    if language == "Hindi":
+        return f"यह बहुत अच्छा प्रश्न है। {current_section_title} के संदर्भ में, मुख्य बात यह है कि अवधारणा को बुनियादी सिद्धांतों से समझें।"
+    elif language == "Hinglish":
+        return f"Yeh bahut achha question hai! {current_section_title} ke context mein, main point yeh hai ki fundamentals clear hone chahiye."
+    return f"That's a great question about {current_section_title}. In simple terms, the key idea is to focus on how the core principles apply here."
+

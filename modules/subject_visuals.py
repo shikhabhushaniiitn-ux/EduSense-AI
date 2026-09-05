@@ -42,6 +42,7 @@ import sympy
 
 from modules.ai_client import generate_ai_response
 from modules.lesson_planner import clean_ai_json_response
+from modules.style_dna import StyleDNA
 
 
 # ============================================================
@@ -836,17 +837,16 @@ def render_graph(spec):
 
         import matplotlib.pyplot as plt
 
-        fig, ax = plt.subplots(figsize=(6, 4))
+        fig, ax = plt.subplots(figsize=(6, 3.8))
+        line_color = StyleDNA.apply_matplotlib_theme(fig, ax)
+        ax.plot(x_values, y_values, color=line_color, linewidth=2.5)
 
-        ax.plot(x_values, y_values, color="#4C6FFF", linewidth=2)
-
-        ax.axhline(0, color="#999999", linewidth=0.8)
-        ax.axvline(0, color="#999999", linewidth=0.8)
+        ax.axhline(0, color=StyleDNA.BORDER_DARK, linewidth=0.8)
+        ax.axvline(0, color=StyleDNA.BORDER_DARK, linewidth=0.8)
 
         ax.set_title(spec.get("title") or f"y = {expression_text}")
         ax.set_xlabel("x")
         ax.set_ylabel("y")
-        ax.grid(True, alpha=0.3)
 
         st.pyplot(fig)
 
@@ -885,13 +885,10 @@ def _escape_mermaid_label(text):
 def _render_mermaid(mermaid_code, height):
 
     html = f"""
-    <div class="mermaid">
+    <div class="mermaid" style="font-family:{StyleDNA.FONT_FAMILY};">
     {mermaid_code}
     </div>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.0/mermaid.min.js"></script>
-    <script>
-      mermaid.initialize({{ startOnLoad: true, theme: "neutral" }});
-    </script>
+    {StyleDNA.get_mermaid_init_script()}
     """
 
     components.html(html, height=height, scrolling=True)

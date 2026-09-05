@@ -38,7 +38,8 @@ from modules.lesson_planner import (
 from modules.teacher import (
     generate_teacher_explanation,
     generate_follow_up_question,
-    generate_visual_narration
+    generate_visual_narration,
+    answer_in_lesson_query
 )
 
 from modules.assessment import (
@@ -94,8 +95,29 @@ from modules.video_pipeline import (
 )
 
 from modules.avatar_provider import (
-    build_avatar_player_html
+    build_avatar_player_html,
+    build_classroom_video_html
 )
+
+from modules.learner_profile import (
+    load_profile,
+    save_profile,
+    record_session_result,
+    get_profile_personalization_context
+)
+
+from modules.learning_path import (
+    generate_learning_path,
+    generate_learning_path_mermaid,
+    PRESET_LEARNING_PATHS
+)
+
+from modules.study_tools import (
+    generate_study_notes,
+    generate_flashcards
+)
+
+from modules.style_dna import StyleDNA
 
 import streamlit.components.v1 as components
 

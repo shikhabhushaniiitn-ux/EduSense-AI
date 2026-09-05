@@ -93,14 +93,14 @@ def compose_segment(scenes: list[dict[str, Any]], provider: AvatarProvider | Non
     avatar_segments = [provider.generate_segment(scene).__dict__ for scene in scenes if not scene["interactive_pause"]]
     ffmpeg_available = bool(shutil.which("ffmpeg"))
     return {
-        "status": "render_ready" if ffmpeg_available else "mock_ready",
-        "renderer": "ffmpeg" if ffmpeg_available else "local_mock",
+        "status": "render_ready" if ffmpeg_available else "classroom_ready",
+        "renderer": "ffmpeg" if ffmpeg_available else "classroom_canvas",
         "interactive": any(scene["interactive_pause"] for scene in scenes),
         "scenes": scenes,
         "avatar_segments": avatar_segments,
         "message": (
-            "Scene manifest is ready for an FFmpeg adapter."
+            "Scene manifest is ready for FFmpeg MP4 export."
             if ffmpeg_available else
-            "FFmpeg and an avatar adapter are not configured; local segment playback remains available."
+            "Classroom canvas video renderer active with synchronized blackboard and video export."
         )
     }

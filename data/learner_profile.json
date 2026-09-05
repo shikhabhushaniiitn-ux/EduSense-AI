@@ -1,0 +1,49 @@
+{
+  "student_name": "Student",
+  "level": "Beginner",
+  "preferred_language": "Hinglish",
+  "total_sessions": 1,
+  "total_study_minutes": 20,
+  "last_active": "2026-09-05 11:31",
+  "topics_studied": [
+    {
+      "topic": "Newton Laws",
+      "first_studied": "2026-09-05 11:31",
+      "last_studied": "2026-09-05 11:31",
+      "best_score": 50.0,
+      "sessions_count": 1
+    }
+  ],
+  "concept_mastery": {
+    "Inertia": 1.0,
+    "F=ma": 0.2
+  },
+  "strong_concepts": [
+    "Inertia"
+  ],
+  "weak_concepts": [
+    "F=ma"
+  ],
+  "misconceptions": [
+    {
+      "concept": "F=ma",
+      "misconception": "Confuses mass with weight",
+      "date": "2026-09-05 11:31"
+    }
+  ],
+  "learning_history": [
+    {
+      "topic": "Newton Laws",
+      "date": "2026-09-05 11:31",
+      "duration": 20,
+      "score_pct": 50.0,
+      "strong_identified": [
+        "Inertia"
+      ],
+      "weak_identified": [
+        "F=ma"
+      ]
+    }
+  ],
+  "current_learning_path": null
+}
