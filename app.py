@@ -229,7 +229,14 @@ defaults = {
     # Ordered, serializable teaching events keyed by section.  The teaching
     # engine owns the cursor; this cache makes reruns and replay deterministic.
     "teaching_timeline": {},
-    "video_scene_cache": {}
+    "video_scene_cache": {},
+    # Teacher persona settings
+    "teacher_persona_name": "Dr. Sophia",
+    "teacher_gender": "female",
+    "teacher_style": "Socratic Mentor",
+    "in_lesson_qa_history": {},
+    "active_learning_path": None,
+    "shortcut_topic": None
 }
 
 
@@ -238,6 +245,110 @@ for key, value in defaults.items():
     if key not in st.session_state:
 
         st.session_state[key] = value
+
+
+# ============================================================
+# RAG GROUNDING HELPER (ensures FAISS chunks reach LLM)
+# ============================================================
+
+def get_grounded_study_material(query, fallback_text="", top_k=5):
+    """
+    Retrieve grounded chunks from FAISS vector index when available.
+    Ensures RAG chunks actually reach the teaching LLM calls!
+    """
+    if st.session_state.get("chunk_index") and st.session_state.get("chunks"):
+        try:
+            chunks = find_relevant_chunks(query, st.session_state.chunk_index, top_k=top_k)
+            if chunks:
+                return "\n\n---\n\n".join(chunks)
+        except Exception as e:
+            print(f"RAG retrieval note: {e}")
+    return fallback_text
+
+
+# ============================================================
+# BROWSER SPEECH-TO-TEXT (STT) COMPONENT
+# ============================================================
+
+def render_speech_input_widget(key_suffix=""):
+    """
+    Browser-native Web Speech API microphone input widget.
+    Allows students to speak answers out loud.
+    """
+    st.components.v1.html(
+        f"""
+        <div style="display:flex; align-items:center; gap:8px; margin: 4px 0; font-family:-apple-system,BlinkMacSystemFont,sans-serif;">
+          <button id="sttBtn_{key_suffix}" onclick="toggleSTT_{key_suffix}()" style="background:#4f46e5; color:#fff; border:none; padding:6px 14px; border-radius:6px; font-size:12px; font-weight:600; cursor:pointer; display:flex; align-items:center; gap:6px;">
+            <span id="sttIcon_{key_suffix}">🎤</span> <span id="sttText_{key_suffix}">Speak Answer (Voice Input)</span>
+          </button>
+          <span id="sttStatus_{key_suffix}" style="font-size:11px; color:#64748b;">Click to speak via microphone</span>
+        </div>
+        <div id="sttBox_{key_suffix}" style="display:none; margin-top:6px; padding:8px 12px; background:#f1f5f9; border-radius:6px; font-size:12px; color:#1e293b; border:1px solid #cbd5e1; line-height:1.5;">
+          <b>Voice Transcribed:</b> <span id="sttTranscript_{key_suffix}" style="color:#0f172a; font-weight:500;"></span>
+          <button onclick="copySTT_{key_suffix}()" style="margin-left:10px; padding:3px 8px; font-size:11px; background:#0ea5e9; color:#fff; border:none; border-radius:4px; cursor:pointer; font-weight:600;">📋 Copy to Text Box</button>
+        </div>
+        <script>
+        let rec_{key_suffix} = null;
+        let isRec_{key_suffix} = false;
+        if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {{
+          const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+          rec_{key_suffix} = new SpeechRec();
+          rec_{key_suffix}.continuous = false;
+          rec_{key_suffix}.interimResults = true;
+
+          rec_{key_suffix}.onstart = () => {{
+            isRec_{key_suffix} = true;
+            document.getElementById('sttText_{key_suffix}').innerText = 'Listening... (Speak your answer)';
+            document.getElementById('sttBtn_{key_suffix}').style.background = '#ef4444';
+            document.getElementById('sttStatus_{key_suffix}').innerText = 'Listening to microphone...';
+          }};
+          rec_{key_suffix}.onresult = (e) => {{
+            let interim = '';
+            for (let i = e.resultIndex; i < e.results.length; ++i) {{
+              interim += e.results[i][0].transcript;
+            }}
+            document.getElementById('sttBox_{key_suffix}').style.display = 'block';
+            document.getElementById('sttTranscript_{key_suffix}').innerText = interim;
+          }};
+          rec_{key_suffix}.onerror = (e) => {{
+            document.getElementById('sttStatus_{key_suffix}').innerText = 'Mic status: ' + (e.error || 'Ready');
+            isRec_{key_suffix} = false;
+            document.getElementById('sttText_{key_suffix}').innerText = 'Speak Answer (Voice Input)';
+            document.getElementById('sttBtn_{key_suffix}').style.background = '#4f46e5';
+          }};
+          rec_{key_suffix}.onend = () => {{
+            isRec_{key_suffix} = false;
+            document.getElementById('sttText_{key_suffix}').innerText = 'Speak Answer (Voice Input)';
+            document.getElementById('sttBtn_{key_suffix}').style.background = '#4f46e5';
+            document.getElementById('sttStatus_{key_suffix}').innerText = 'Transcription ready! Click Copy, then paste into answer box.';
+          }};
+        }}
+
+        function toggleSTT_{key_suffix}() {{
+          if (!rec_{key_suffix}) {{
+            alert('Voice input is supported in Google Chrome, Microsoft Edge, and Safari.');
+            return;
+          }}
+          if (isRec_{key_suffix}) {{
+            rec_{key_suffix}.stop();
+          }} else {{
+            rec_{key_suffix}.start();
+          }}
+        }}
+
+        function copySTT_{key_suffix}() {{
+          const txt = document.getElementById('sttTranscript_{key_suffix}').innerText;
+          navigator.clipboard.writeText(txt).then(() => {{
+            alert('Copied transcribed answer to clipboard! Now paste it into the answer box below.');
+          }}).catch(() => {{
+            alert('Select and copy the text: ' + txt);
+          }});
+        }}
+        </script>
+        """,
+        height=95,
+        scrolling=False
+    )
 
 
 # ============================================================
@@ -262,29 +373,79 @@ st.write(
 
 with st.sidebar:
 
-    st.header("📚 Learning Tools")
+    st.header("📚 Learning Studio")
 
-    st.write(
-        "Upload a study document to get started."
-    )
+    # --------------------------------------------------------
+    # 👤 PERSISTENT STUDENT LEARNING PROFILE (Req 14)
+    # --------------------------------------------------------
+    with st.expander("👤 Student Learning Profile", expanded=False):
+        try:
+            profile_data = load_profile()
+            col_p1, col_p2 = st.columns(2)
+            col_p1.metric("Study Time", f"{profile_data.get('total_study_minutes', 0)}m")
+            col_p2.metric("Lessons", profile_data.get("total_sessions", 0))
+
+            st.markdown("**Concept Mastery:**")
+            mastery_dict = profile_data.get("concept_mastery", {})
+            if mastery_dict:
+                for c_name, c_score in list(mastery_dict.items())[-5:]:
+                    score_val = float(c_score) if isinstance(c_score, (int, float)) else 0.5
+                    st.progress(min(1.0, max(0.0, score_val)), text=f"{c_name}: {int(score_val * 100)}%")
+            else:
+                st.caption("Complete lesson checkpoints to build concept mastery.")
+
+            weak_list = profile_data.get("weak_concepts", [])
+            if weak_list:
+                st.warning(f"⚠️ Focus Areas: {', '.join(weak_list[:3])}")
+
+            misc_list = profile_data.get("misconceptions", [])
+            if misc_list:
+                st.caption(f"🧠 Historical Misconceptions Addressed: {len(misc_list)}")
+
+            studied = profile_data.get("topics_studied", [])
+            if studied:
+                st.markdown("**Recent Topics:**")
+                for item in studied[-3:]:
+                    st.caption(f"• {item.get('topic', 'Lesson')} (Best: {item.get('best_score', 0)}%)")
+        except Exception as err:
+            st.caption(f"Profile status: {err}")
+
+    # --------------------------------------------------------
+    # 🗺️ AI-GENERATED LEARNING PATHS (Req 15)
+    # --------------------------------------------------------
+    with st.expander("🗺️ AI Learning Roadmaps", expanded=False):
+        st.write("Explore structured curricula with prerequisite progressions:")
+        preset_names = list(PRESET_LEARNING_PATHS.keys()) + ["Custom Topic..."]
+        chosen_path = st.selectbox("Curriculum Domain:", preset_names, key="sidebar_curriculum_choice")
+
+        custom_topic_query = ""
+        if chosen_path == "Custom Topic...":
+            custom_topic_query = st.text_input("Enter broad domain:", "Data Science", key="custom_path_input")
+
+        if st.button("🚀 Load Learning Roadmap", key="load_roadmap_btn"):
+            path_domain = custom_topic_query if chosen_path == "Custom Topic..." else chosen_path
+            with st.spinner(f"Generating roadmap for {path_domain}..."):
+                st.session_state.active_learning_path = generate_learning_path(path_domain)
+                st.success(f"Roadmap loaded for {path_domain}! See main panel.")
 
     st.divider()
 
     st.info(
         """
-        **Current Features**
+        **EduSense AI Capabilities**
 
-        📄 PDF / DOCX / PPTX / TXT Processing  
-        💡 Topic Mode (no upload needed)  
-        🧠 Semantic Search  
-        🔍 Document Q&A  
-        📝 AI Summary  
-        📚 Source-based Answers  
-        🎯 Personalized Lesson  
-        🧑‍🏫 AI Teacher with Talking Avatar  
-        ❓ Interactive Quiz  
-        📊 Learning Report  
-        📅 7-Day Plan
+        📄 Multi-format Ingestion (PDF/DOCX/PPTX/TXT)  
+        💡 Topic-based Teaching (Zero upload needed)  
+        🧠 Semantic Vector Grounding (FAISS)  
+        🎓 16:9 Virtual Classroom Video with Lip-sync  
+        🎙️ Neural Edge-TTS Speech with Word Highlighting  
+        📹 In-browser WebM Video Lesson Recording  
+        🎯 Adaptive Checkpoint & Misconception Engine  
+        💬 Live In-Lesson "Ask Teacher" Q&A  
+        🎤 Browser Speech-to-Text Voice Answering  
+        👤 Persistent Student Mastery Profile  
+        🗺️ AI-Generated Learning Roadmaps  
+        📚 Flip Flashcards & Revision Notes Export  
         """
     )
 
@@ -317,12 +478,59 @@ if input_mode == "📄 Upload Study Material":
 
 else:
 
+    # --------------------------------------------------------
+    # 🗺️ ACTIVE LEARNING PATH DISPLAY (if selected from sidebar)
+    # --------------------------------------------------------
+    if st.session_state.get("active_learning_path"):
+        lp = st.session_state.active_learning_path
+        with st.expander(f"🗺️ Active Learning Roadmap: {lp.get('title', 'Curriculum')}", expanded=True):
+            st.write(lp.get("description", ""))
+            mermaid_code = generate_learning_path_mermaid(lp)
+            if mermaid_code:
+                st.components.v1.html(
+                    f"""
+                    {StyleDNA.get_mermaid_init_script()}
+                    <div class="mermaid" style="display:flex; justify-content:center;">
+                    {mermaid_code}
+                    </div>
+                    """,
+                    height=200,
+                    scrolling=True
+                )
+            st.write("**Jump to a module in this roadmap:**")
+            mod_cols = st.columns(min(len(lp.get("modules", [])), 4))
+            for m_idx, mod in enumerate(lp.get("modules", [])):
+                col_m = mod_cols[m_idx % len(mod_cols)]
+                with col_m:
+                    if st.button(f"📘 {mod.get('order', m_idx+1)}. {mod.get('title')}", key=f"lp_mod_{m_idx}"):
+                        st.session_state.shortcut_topic = f"{lp.get('title', '')}: {mod.get('title')}"
+                        st.rerun()
+
+    # --------------------------------------------------------
+    # ⚡ POPULAR TOPIC SHORTCUTS (Req 22)
+    # --------------------------------------------------------
+    st.write("🔥 **Popular Topic Shortcuts:**")
+    sc1, sc2, sc3 = st.columns(3)
+    if sc1.button("🤖 AI From The Beginning", key="sc_ai"):
+        st.session_state.shortcut_topic = "Artificial Intelligence from the beginning"
+        st.rerun()
+    if sc2.button("🍎 Newton's Laws (Class 8)", key="sc_newton"):
+        st.session_state.shortcut_topic = "Newton's Laws for Class 8"
+        st.rerun()
+    if sc3.button("⚛️ React Technical Interview", key="sc_react"):
+        st.session_state.shortcut_topic = "React for a technical interview"
+        st.rerun()
+
+    current_default_topic = st.session_state.get("shortcut_topic") or ""
+
     topic_query = st.text_input(
         "💡 What would you like to learn about?",
+        value=current_default_topic,
         placeholder=(
             "e.g. \"Photosynthesis\", \"Newton's Laws of Motion\", "
             "\"Linear Regression\""
-        )
+        ),
+        key="topic_query_input"
     )
 
     generate_topic_clicked = st.button(
@@ -330,7 +538,12 @@ else:
         key="generate_topic_material"
     )
 
-    if generate_topic_clicked:
+    # Auto-trigger if shortcut was clicked
+    should_generate = generate_topic_clicked or bool(st.session_state.get("shortcut_topic"))
+    if st.session_state.get("shortcut_topic"):
+        st.session_state.shortcut_topic = None
+
+    if should_generate:
 
         if not topic_query or not topic_query.strip():
 
@@ -858,11 +1071,10 @@ if st.session_state.cleaned_text:
 
 
     # --------------------------------------------------------
-    # Lesson settings
+    # Lesson settings (Level, Language, Duration, Teacher Persona)
     # --------------------------------------------------------
 
-    col1, col2, col3 = st.columns(3)
-
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
 
@@ -882,29 +1094,27 @@ if st.session_state.cleaned_text:
             )
         )
 
-
     with col2:
+
+        lang_choices = [
+            "English", "Hindi", "Hinglish",
+            "Tamil", "Telugu", "Bengali",
+            "Marathi", "Gujarati", "Kannada", "Malayalam",
+            "Spanish", "French", "German"
+        ]
+        curr_lang = st.session_state.preferred_language
+        if curr_lang not in lang_choices:
+            curr_lang = "English"
 
         preferred_language = st.selectbox(
             "🌐 Preferred Language",
-            [
-                "English",
-                "Hindi",
-                "Hinglish"
-            ],
-            index=[
-                "English",
-                "Hindi",
-                "Hinglish"
-            ].index(
-                st.session_state.preferred_language
-            )
+            lang_choices,
+            index=lang_choices.index(curr_lang)
         )
-
 
     with col3:
 
-        duration_options = [15, 20, 30, 45, 60, "7 Days"]
+        duration_options = [5, 15, 20, 30, 45, 60, "7 Days"]
 
         current_duration = st.session_state.lesson_duration
 
@@ -916,9 +1126,42 @@ if st.session_state.cleaned_text:
             duration_options,
             index=duration_options.index(
                 current_duration
-            )
+            ),
+            help="5 min: Rapid core concept sprint. 20 min: Comprehensive lesson with visual models."
         )
 
+    with col4:
+
+        persona_options = [
+            "Dr. Sophia (Socratic Mentor - Female)",
+            "Prof. Marcus (Academic Professor - Male)",
+            "Coach Alex (Supportive Coach - Casual)"
+        ]
+        curr_persona = st.session_state.get("teacher_persona_name", "Dr. Sophia")
+        persona_idx = 0
+        if "Marcus" in curr_persona:
+            persona_idx = 1
+        elif "Alex" in curr_persona:
+            persona_idx = 2
+
+        chosen_persona = st.selectbox(
+            "🧑‍🏫 Teacher Persona",
+            persona_options,
+            index=persona_idx
+        )
+
+        if "Marcus" in chosen_persona:
+            st.session_state.teacher_persona_name = "Prof. Marcus"
+            st.session_state.teacher_gender = "male"
+            st.session_state.teacher_style = "Academic Professor"
+        elif "Alex" in chosen_persona:
+            st.session_state.teacher_persona_name = "Coach Alex"
+            st.session_state.teacher_gender = "female"
+            st.session_state.teacher_style = "Supportive Coach"
+        else:
+            st.session_state.teacher_persona_name = "Dr. Sophia"
+            st.session_state.teacher_gender = "female"
+            st.session_state.teacher_style = "Socratic Mentor"
 
     # --------------------------------------------------------
     # Optional source-grounded topic selection. The existing free-text focus
@@ -943,15 +1186,12 @@ if st.session_state.cleaned_text:
 
     st.session_state.focus_topic = focus_topic
 
-
     # --------------------------------------------------------
     # Save settings
     # --------------------------------------------------------
 
     st.session_state.student_level = student_level
-
     st.session_state.preferred_language = preferred_language
-
     st.session_state.lesson_duration = lesson_duration
 
 
@@ -2649,10 +2889,16 @@ if st.session_state.cleaned_text:
 
                         try:
 
+                            grounded_material = get_grounded_study_material(
+                                f"{concept_teaching_section.get('title', '')} {active_concept}",
+                                st.session_state.cleaned_text,
+                                top_k=5
+                            )
+
                             explanation = (
                                 generate_teacher_explanation(
                                     concept_teaching_section,
-                                    st.session_state.cleaned_text,
+                                    grounded_material,
                                     st.session_state.student_level,
                                     st.session_state.preferred_language,
                                     visual_spec=current_visual_spec
@@ -2737,7 +2983,8 @@ if st.session_state.cleaned_text:
                                         generate_speech(
                                             voice_text,
                                             st.session_state
-                                            .preferred_language
+                                            .preferred_language,
+                                            gender=st.session_state.get("teacher_gender", "female")
                                         )
                                     )
 
@@ -2774,25 +3021,61 @@ if st.session_state.cleaned_text:
                         if cached_audio:
 
                             components.html(
-                                build_avatar_player_html(
+                                build_classroom_video_html(
                                     cached_audio,
-                                    cached_timings
+                                    cached_timings,
+                                    section_title=concept_teaching_section.get("title", f"Section {current_index + 1}"),
+                                    concept_title=str(active_concept) or "Key Concept",
+                                    visual_spec=current_visual_spec,
+                                    teacher_name=st.session_state.get("teacher_persona_name", "Dr. Sophia"),
+                                    teacher_gender=st.session_state.get("teacher_gender", "female"),
+                                    teacher_style=st.session_state.get("teacher_style", "Socratic Mentor")
                                 ),
-                                height=340,
+                                height=520,
                                 scrolling=True
                             )
                             with st.expander("Captions / transcript"):
                                 st.write(voice_text)
 
                     # --------------------------------------------
-                    # 🔊 AI Teaching Voice ends here; the visual
-                    # itself now renders EARLIER (right after
-                    # detection, before the explanation/audio) so
-                    # the student sees it as soon as they open the
-                    # section instead of scrolling past everything
-                    # else first - see the "🎨 Subject-Aware
-                    # Visual" block above.
+                    # 💬 IN-LESSON "ASK TEACHER" Q&A (Task 2 & Req 8)
                     # --------------------------------------------
+                    with st.expander("💬 Ask Teacher / Clarify Concept (In-Lesson Q&A)", expanded=False):
+                        st.caption(f"Have a doubt about **{active_concept}**? Ask {st.session_state.get('teacher_persona_name', 'your teacher')} without losing lesson state.")
+                        qcols = st.columns(3)
+                        preset_ask = ""
+                        if qcols[0].button("💡 Another Example", key=f"qbtn_ex_{current_index}_{concept_position}"):
+                            preset_ask = "Can you give another simple real-world example of this concept?"
+                        if qcols[1].button("🇮🇳 Explain in Hindi / Hinglish", key=f"qbtn_hi_{current_index}_{concept_position}"):
+                            preset_ask = "Please explain this concept in Hindi / Hinglish."
+                        if qcols[2].button("❓ Why does this happen?", key=f"qbtn_why_{current_index}_{concept_position}"):
+                            preset_ask = f"Why does this happen in {active_concept}?"
+
+                        ask_text = st.text_input(
+                            "Your question to teacher:",
+                            value=preset_ask,
+                            placeholder="e.g. 'Why does resistance increase heat?' or 'Explain in Hindi'",
+                            key=f"ask_input_{current_index}_{concept_position}"
+                        )
+                        if st.button("🙋 Ask Teacher", key=f"send_ask_{current_index}_{concept_position}"):
+                            if ask_text.strip():
+                                with st.spinner("🧑‍🏫 Teacher is responding..."):
+                                    grounded_qa = get_grounded_study_material(f"{active_concept} {ask_text}", st.session_state.cleaned_text, top_k=4)
+                                    reply = answer_in_lesson_query(
+                                        ask_text,
+                                        str(active_concept),
+                                        current_explanation or str(active_concept),
+                                        study_material=grounded_qa,
+                                        level=st.session_state.student_level,
+                                        language=st.session_state.preferred_language,
+                                        teacher_persona=st.session_state.get("teacher_persona_name", "Dr. Sophia")
+                                    )
+                                    st.session_state.setdefault("in_lesson_qa_history", {})[f"{current_index}_{concept_position}"] = reply
+
+                        saved_reply = st.session_state.get("in_lesson_qa_history", {}).get(f"{current_index}_{concept_position}")
+                        if saved_reply:
+                            st.markdown(f"**🧑‍🏫 {st.session_state.get('teacher_persona_name', 'Teacher')} replied:**")
+                            st.info(saved_reply)
 
 
                 # ------------------------------------------------
@@ -2883,10 +3166,11 @@ if st.session_state.cleaned_text:
                         )
 
                     else:
+                        render_speech_input_widget(key_suffix=f"{current_index}_{question_position}")
                         student_answer = st.text_area(
                             "✍️ Your Answer",
                             value=st.session_state.student_answer,
-                            placeholder="Write your answer here...",
+                            placeholder="Type your answer here, or click Speak Answer above...",
                             key=f"student_answer_{current_index}_{question_position}"
                         )
 
@@ -2916,11 +3200,16 @@ if st.session_state.cleaned_text:
                                 )
                             }
                         else:
+                            grounded_eval_mat = get_grounded_study_material(
+                                f"{expected_concept} {question_text}",
+                                st.session_state.cleaned_text,
+                                top_k=4
+                            )
                             evaluation = evaluate_answer(
                                 student_answer,
                                 expected_concept,
                                 question=question_text,
-                                study_material=st.session_state.cleaned_text,
+                                study_material=grounded_eval_mat,
                                 level=st.session_state.student_level,
                                 language=st.session_state.preferred_language
                             )
@@ -3049,11 +3338,16 @@ if st.session_state.cleaned_text:
 
                                 try:
 
+                                    grounded_remed_mat = get_grounded_study_material(
+                                        f"{expected_concept} {learning_gap}",
+                                        st.session_state.cleaned_text,
+                                        top_k=4
+                                    )
+
                                     remediation_text = (
                                         generate_teacher_explanation(
                                             remediation_section,
-                                            st.session_state
-                                            .cleaned_text,
+                                            grounded_remed_mat,
                                             st.session_state
                                             .student_level,
                                             st.session_state
@@ -3191,6 +3485,7 @@ if st.session_state.cleaned_text:
                             st.markdown("### 🔁 Quick follow-up check")
                             st.write(adaptation["follow_up_question"])
 
+                            render_speech_input_widget(key_suffix=f"followup_{current_index}")
                             follow_up_answer = st.text_area(
                                 "Your follow-up answer",
                                 placeholder="Try the new question in your own words...",
@@ -3201,11 +3496,16 @@ if st.session_state.cleaned_text:
                                 "✅ Check follow-up answer",
                                 key=f"check_follow_up_{current_index}"
                             ):
+                                grounded_followup_mat = get_grounded_study_material(
+                                    f"{expected_concept} {adaptation['follow_up_question']}",
+                                    st.session_state.cleaned_text,
+                                    top_k=4
+                                )
                                 follow_up_evaluation = evaluate_answer(
                                     follow_up_answer,
                                     expected_concept,
                                     question=adaptation["follow_up_question"],
-                                    study_material=st.session_state.cleaned_text,
+                                    study_material=grounded_followup_mat,
                                     level=st.session_state.student_level,
                                     language=st.session_state.preferred_language
                                 )
@@ -3776,6 +4076,59 @@ if st.session_state.cleaned_text:
                                 "You're ready to move on to the next topic!"
                             )
 
+                        # ------------------------------------------------
+                        # 👤 PERSIST TO LEARNER PROFILE (Req 14)
+                        # ------------------------------------------------
+                        try:
+                            record_session_result(
+                                topic=lesson.get("topic", "Lesson"),
+                                level=st.session_state.student_level,
+                                language=st.session_state.preferred_language,
+                                duration_minutes=st.session_state.lesson_duration,
+                                learning_summary=summary,
+                                final_score=score,
+                                total_quiz_questions=total_questions
+                            )
+                            st.caption("✅ Session progress and concept mastery saved to your Student Profile.")
+                        except Exception as prof_err:
+                            print(f"Profile update note: {prof_err}")
+
+                        # ------------------------------------------------
+                        # 📚 REVISION FLASHCARDS & STUDY NOTES (Req 18)
+                        # ------------------------------------------------
+                        st.divider()
+                        st.header("📚 Revision Flashcards & Study Tools")
+                        st.write("Reinforce your understanding with active recall and downloadable study notes:")
+
+                        tools_tab1, tools_tab2 = st.tabs(["🗂️ Interactive Flashcards", "📝 Comprehensive Study Notes"])
+
+                        with tools_tab1:
+                            flashcards = generate_flashcards(lesson, max_cards=6)
+                            if flashcards:
+                                fc_cols = st.columns(min(len(flashcards), 3))
+                                for f_idx, card in enumerate(flashcards):
+                                    col_fc = fc_cols[f_idx % len(fc_cols)]
+                                    with col_fc:
+                                        with st.container(border=True):
+                                            st.markdown(f"**Card {f_idx + 1}: {card.get('concept', 'Key Idea')}**")
+                                            st.write(f"❓ {card.get('front', '')}")
+                                            with st.expander("💡 Reveal Concept Answer"):
+                                                st.success(card.get("back", ""))
+                            else:
+                                st.caption("Flashcards generated from lesson checkpoints.")
+
+                        with tools_tab2:
+                            study_notes_md = generate_study_notes(lesson, language=st.session_state.preferred_language)
+                            st.download_button(
+                                "📥 Download Revision Notes (.md)",
+                                data=study_notes_md,
+                                file_name=f"EduSense_Revision_{lesson.get('topic', 'Lesson').replace(' ', '_')}.md",
+                                mime="text/markdown",
+                                key="download_study_notes_btn"
+                            )
+                            with st.expander("📖 Preview Revision Notes", expanded=True):
+                                st.markdown(study_notes_md)
+
 
 
 # ============================================================
@@ -3785,5 +4138,5 @@ if st.session_state.cleaned_text:
 else:
 
     st.info(
-        "👆 Upload a PDF above to begin learning with EduSense AI."
+        "👆 Upload study material or enter a topic above to begin learning with EduSense AI."
     )

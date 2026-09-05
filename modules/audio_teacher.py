@@ -99,7 +99,7 @@ def prepare_text_for_speech(text):
 
 async def _synthesize(text, voice):
     """
-    Stream audio + WordBoundary timing events from Edge TTS.
+    Stream audio + WordBoundary or SentenceBoundary timing events from Edge TTS.
 
     Returns (audio_bytes, word_timings), where word_timings is a
     list of {"text": str, "start_ms": float, "end_ms": float},
@@ -110,6 +110,7 @@ async def _synthesize(text, voice):
 
     audio_chunks = []
     word_timings = []
+    sentence_boundaries = []
 
     async for chunk in communicate.stream():
 
@@ -127,9 +128,41 @@ async def _synthesize(text, voice):
 
             word_timings.append({
                 "text": chunk["text"],
-                "start_ms": start_ms,
-                "end_ms": start_ms + duration_ms
+                "start_ms": round(start_ms, 1),
+                "end_ms": round(start_ms + duration_ms, 1)
             })
+
+        elif chunk["type"] == "SentenceBoundary":
+
+            start_ms = chunk["offset"] / 10000
+            duration_ms = chunk["duration"] / 10000
+            sentence_boundaries.append({
+                "text": chunk.get("text", ""),
+                "start_ms": start_ms,
+                "duration_ms": duration_ms
+            })
+
+    # If edge-tts emitted SentenceBoundary instead of WordBoundary,
+    # interpolate words proportionally so word-level captions and
+    # lip-sync remain fully synchronized!
+    if not word_timings and sentence_boundaries:
+        for sb in sentence_boundaries:
+            s_text = sb.get("text", "")
+            s_start = sb.get("start_ms", 0)
+            s_dur = sb.get("duration_ms", 0)
+            words = s_text.split()
+            if not words or s_dur <= 0:
+                continue
+            total_chars = sum(len(w) for w in words)
+            cur_time = s_start
+            for w in words:
+                w_dur = (len(w) / total_chars) * s_dur
+                word_timings.append({
+                    "text": w,
+                    "start_ms": round(cur_time, 1),
+                    "end_ms": round(cur_time + w_dur, 1)
+                })
+                cur_time += w_dur
 
     audio_bytes = b"".join(audio_chunks)
 

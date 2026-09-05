@@ -2,9 +2,9 @@
   "student_name": "Student",
   "level": "Beginner",
   "preferred_language": "Hinglish",
-  "total_sessions": 1,
-  "total_study_minutes": 20,
-  "last_active": "2026-09-05 11:31",
+  "total_sessions": 4,
+  "total_study_minutes": 80,
+  "last_active": "2026-09-05 12:13",
   "topics_studied": [
     {
       "topic": "Newton Laws",
@@ -12,14 +12,30 @@
       "last_studied": "2026-09-05 11:31",
       "best_score": 50.0,
       "sessions_count": 1
+    },
+    {
+      "topic": "Test Physics Unit",
+      "first_studied": "2026-09-05 12:00",
+      "last_studied": "2026-09-05 12:04",
+      "best_score": 80.0,
+      "sessions_count": 2
+    },
+    {
+      "topic": "Newton's Laws of Motion aur unke Foundations",
+      "first_studied": "2026-09-05 12:13",
+      "last_studied": "2026-09-05 12:13",
+      "best_score": 80.0,
+      "sessions_count": 1
     }
   ],
   "concept_mastery": {
-    "Inertia": 1.0,
-    "F=ma": 0.2
+    "Inertia": 0.75,
+    "F=ma": 0.28,
+    "First Law": 1.0
   },
   "strong_concepts": [
-    "Inertia"
+    "Inertia",
+    "First Law"
   ],
   "weak_concepts": [
     "F=ma"
@@ -29,6 +45,16 @@
       "concept": "F=ma",
       "misconception": "Confuses mass with weight",
       "date": "2026-09-05 11:31"
+    },
+    {
+      "concept": "F=ma",
+      "misconception": "Confuses mass with velocity",
+      "date": "2026-09-05 12:00"
+    },
+    {
+      "concept": "Inertia",
+      "misconception": "Student sochta hai ki engine directly passenger pe dhakka deta hai, yani wo force ke source ko galat identify karta hai aur inertia concept ko samajh nahi raha.",
+      "date": "2026-09-05 12:13"
     }
   ],
   "learning_history": [
@@ -42,6 +68,40 @@
       ],
       "weak_identified": [
         "F=ma"
+      ]
+    },
+    {
+      "topic": "Test Physics Unit",
+      "date": "2026-09-05 12:00",
+      "duration": 20,
+      "score_pct": 80.0,
+      "strong_identified": [
+        "First Law"
+      ],
+      "weak_identified": [
+        "F=ma"
+      ]
+    },
+    {
+      "topic": "Test Physics Unit",
+      "date": "2026-09-05 12:04",
+      "duration": 20,
+      "score_pct": 80.0,
+      "strong_identified": [
+        "First Law"
+      ],
+      "weak_identified": [
+        "F=ma"
+      ]
+    },
+    {
+      "topic": "Newton's Laws of Motion aur unke Foundations",
+      "date": "2026-09-05 12:13",
+      "duration": 20,
+      "score_pct": 80.0,
+      "strong_identified": [],
+      "weak_identified": [
+        "Inertia"
       ]
     }
   ],

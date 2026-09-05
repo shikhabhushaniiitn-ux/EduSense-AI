@@ -472,36 +472,82 @@ def build_classroom_video_html(
       function draw() {{
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         const t = Date.now() * 0.003;
-        const bob = isSpeaking ? Math.sin(t * 4) * 2 : Math.sin(t * 1.5) * 1;
+        const bob = isSpeaking ? Math.sin(t * 4) * 2.5 : Math.sin(t * 1.5) * 1;
         const cx = 80, cy = 80 + bob;
 
-        // Shoulder / torso
+        // Torso / shoulders
         ctx.fillStyle = "{accent}";
-        ctx.beginPath(); ctx.ellipse(cx, cy + 74, 52, 36, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.ellipse(cx, cy + 74, 54, 38, 0, 0, Math.PI * 2); ctx.fill();
+
+        // Collar / Shirt detail
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.moveTo(cx - 15, cy + 36); ctx.lineTo(cx, cy + 50); ctx.lineTo(cx + 15, cy + 36);
+        ctx.closePath(); ctx.fill();
 
         // Neck
         ctx.fillStyle = "#f87171";
-        ctx.fillRect(cx - 12, cy + 15, 24, 20);
+        ctx.fillRect(cx - 12, cy + 15, 24, 22);
 
         // Head
         ctx.fillStyle = "#fca5a5";
         ctx.beginPath(); ctx.arc(cx, cy - 8, 38, 0, Math.PI * 2); ctx.fill();
 
-        // Hair
-        ctx.fillStyle = "#1e1b4b";
-        ctx.beginPath(); ctx.arc(cx, cy - 16, 40, Math.PI, 0); ctx.fill();
+        // Persona-specific Hair & Accessories
+        const isMale = "{teacher_gender}" === "male";
+        const isCoach = "{teacher_name}".toLowerCase().includes("coach") || "{teacher_name}".toLowerCase().includes("alex");
+
+        if (isCoach) {{
+          // Sporty Cap
+          ctx.fillStyle = "{accent}";
+          ctx.beginPath(); ctx.arc(cx, cy - 20, 39, Math.PI, 0); ctx.fill();
+          ctx.fillRect(cx - 42, cy - 22, 84, 8);
+          // Visor
+          ctx.fillStyle = "#0f172a";
+          ctx.beginPath(); ctx.ellipse(cx + 15, cy - 20, 30, 8, 0.1, 0, Math.PI * 2); ctx.fill();
+        }} else if (isMale) {{
+          // Academic Short Hair
+          ctx.fillStyle = "#334155";
+          ctx.beginPath(); ctx.arc(cx, cy - 18, 39, Math.PI, 0); ctx.fill();
+          ctx.fillRect(cx - 38, cy - 25, 76, 12);
+          // Professor Glasses
+          ctx.strokeStyle = "#475569"; ctx.lineWidth = 2.5;
+          ctx.strokeRect(cx - 24, cy - 16, 18, 12);
+          ctx.strokeRect(cx + 6, cy - 16, 18, 12);
+          ctx.beginPath(); ctx.moveTo(cx - 6, cy - 10); ctx.lineTo(cx + 6, cy - 10); ctx.stroke();
+        }} else {{
+          // Sophia Long Stylish Hair
+          ctx.fillStyle = "#1e1b4b";
+          ctx.beginPath(); ctx.arc(cx, cy - 16, 41, Math.PI, 0); ctx.fill();
+          // Side locks
+          ctx.fillRect(cx - 39, cy - 16, 10, 48);
+          ctx.fillRect(cx + 29, cy - 16, 10, 48);
+        }}
 
         // Eyes
         ctx.fillStyle = "#0f172a";
         if (blinkState === 1) {{
-          ctx.fillRect(cx - 17, cy - 12, 12, 2);
-          ctx.fillRect(cx + 5, cy - 12, 12, 2);
+          ctx.fillRect(cx - 17, cy - 12, 12, 2.5);
+          ctx.fillRect(cx + 5, cy - 12, 12, 2.5);
         }} else {{
           ctx.beginPath();
           ctx.arc(cx - 11, cy - 12, 4.5, 0, Math.PI * 2);
           ctx.arc(cx + 11, cy - 12, 4.5, 0, Math.PI * 2);
           ctx.fill();
+          // Eye reflection spark
+          ctx.fillStyle = "#ffffff";
+          ctx.beginPath();
+          ctx.arc(cx - 9.5, cy - 13.5, 1.5, 0, Math.PI * 2);
+          ctx.arc(cx + 12.5, cy - 13.5, 1.5, 0, Math.PI * 2);
+          ctx.fill();
         }}
+
+        // Eyebrows
+        ctx.strokeStyle = "#475569"; ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cx - 18, cy - 18); ctx.lineTo(cx - 5, cy - 18);
+        ctx.moveTo(cx + 5, cy - 18); ctx.lineTo(cx + 18, cy - 18);
+        ctx.stroke();
 
         // Mouth (lip-sync movement)
         if (mouthOpenness > 5) {{
@@ -509,8 +555,11 @@ def build_classroom_video_html(
           ctx.beginPath();
           ctx.ellipse(cx, cy + 13, 9, Math.max(2, mouthOpenness), 0, 0, Math.PI * 2);
           ctx.fill();
+          // Teeth detail
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(cx - 5, cy + 13 - Math.min(mouthOpenness / 2, 3), 10, 2.5);
         }} else {{
-          ctx.strokeStyle = "#881337"; ctx.lineWidth = 2;
+          ctx.strokeStyle = "#881337"; ctx.lineWidth = 2.5;
           ctx.beginPath(); ctx.moveTo(cx - 7, cy + 13); ctx.lineTo(cx + 7, cy + 13); ctx.stroke();
         }}
 
@@ -519,7 +568,7 @@ def build_classroom_video_html(
       draw();
     }})();
 
-    // Client-side Video Recording capability
+    // Client-side Video Recording capability (Audio + Video)
     let mediaRecorder = null;
     let recordedChunks = [];
     function toggleRecord() {{
@@ -533,25 +582,42 @@ def build_classroom_video_html(
         btn.style.background = "#4f46e5";
       }} else {{
         try {{
-          const stream = canvas.captureStream(30);
+          let videoStream = canvas.captureStream(30);
+          let combinedStream = videoStream;
+          try {{
+            let audioStream = audio.captureStream ? audio.captureStream() : (audio.mozCaptureStream ? audio.mozCaptureStream() : null);
+            if (audioStream && audioStream.getAudioTracks().length > 0) {{
+              combinedStream = new MediaStream([videoStream.getVideoTracks()[0], audioStream.getAudioTracks()[0]]);
+            }}
+          }} catch (e) {{
+            console.log("Audio capture note:", e);
+          }}
+
           recordedChunks = [];
-          mediaRecorder = new MediaRecorder(stream, {{ mimeType: "video/webm" }});
+          let mime = "video/webm";
+          if (window.MediaRecorder && MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")) {{
+            mime = "video/webm;codecs=vp9,opus";
+          }} else if (window.MediaRecorder && MediaRecorder.isTypeSupported("video/webm")) {{
+            mime = "video/webm";
+          }}
+
+          mediaRecorder = new MediaRecorder(combinedStream, {{ mimeType: mime }});
           mediaRecorder.ondataavailable = (e) => {{ if (e.data.size > 0) recordedChunks.push(e.data); }};
           mediaRecorder.onstop = () => {{
-            const blob = new Blob(recordedChunks, {{ type: "video/webm" }});
+            const blob = new Blob(recordedChunks, {{ type: mime }});
             const url = URL.createObjectURL(blob);
             const a = document.createElement("a");
             a.href = url;
-            a.download = "EduSense_Teaching_Lesson.webm";
+            a.download = "EduSense_Classroom_Lesson.webm";
             a.click();
           }};
           mediaRecorder.start();
           audio.currentTime = 0;
           audio.play();
-          btn.innerHTML = "<span>⏹️</span> Stop & Save";
+          btn.innerHTML = "<span>⏹️</span> Recording... Stop & Save";
           btn.style.background = "#ef4444";
         }} catch(err) {{
-          alert("Video recording initialized: please play lecture to capture.");
+          alert("Video recording initialized: play the lesson audio to record.");
         }}
       }}
     }}
